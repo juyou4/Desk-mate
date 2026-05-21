@@ -1,0 +1,33 @@
+{
+  "spec_version": 1,
+  "id": "pixel_default",
+  "display_name": "Pixel Default",
+  "author": "Deskmate",
+  "canvas_size": [32, 32],
+  "scale": 1,
+  "palette": ["#aaacb2", "#787c84", "#ea78b4", "#f69c40", "#4285f4"],
+  "avatar": {
+    "default_style": "pixel",
+    "supported_styles": ["pixel", "emoji"]
+  },
+  "states": {
+    "idle": { "fps": 4, "frames": ["idle/000.png", "idle/001.png"] },
+    "working": { "fps": 4, "frames": ["working/000.png"] },
+    "thinking": { "fps": 4, "frames": ["thinking/000.png"] },
+    "alert": { "fps": 4, "frames": ["alert/000.png"] },
+    "happy": { "fps": 4, "frames": ["happy/000.png"] }
+  },
+  "required_states": ["idle", "working", "thinking", "alert"],
+  "bubble_config": {
+    "icon": "chat",
+    "templates": {
+      "greeting": "👋",
+      "idle_nudge": "still here :)"
+    }
+  },
+  "fallbacks": {
+    "walking_left": "walking",
+    "walking_right": "walking"
+  },
+  "capabilities": ["chat", "proactive_nudge"]
+}

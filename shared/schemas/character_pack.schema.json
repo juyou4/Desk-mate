@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://deskmate.local/schemas/character_pack.schema.json",
+  "title": "CharacterPackManifest",
+  "description": "Deskmate V10 I4 / L1-D: manifest-first entry point for a character pack. Forward-compatible: unknown fields MUST be preserved.",
+  "type": "object",
+  "required": ["spec_version", "id", "display_name"],
+  "additionalProperties": true,
+  "properties": {
+    "spec_version": { "type": "integer", "minimum": 1 },
+    "id": { "type": "string", "minLength": 1 },
+    "display_name": { "type": "string", "minLength": 1 },
+    "author": { "type": ["string", "null"] },
+    "canvas_size": {
+      "type": "array",
+      "items": { "type": "integer", "minimum": 1 },
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "scale": { "type": "number", "exclusiveMinimum": 0 },
+    "palette": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$" }
+    },
+    "avatar": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "default_style": { "type": "string" },
+        "supported_styles": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "states": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["frames"],
+        "properties": {
+          "fps": { "type": "integer", "minimum": 1, "maximum": 60 },
+          "frames": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 },
+            "minItems": 1
+          }
+        }
+      }
+    },
+    "required_states": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true,
+      "default": ["idle", "working", "thinking", "alert"]
+    },
+    "idle_transitions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["to"],
+          "properties": {
+            "to": { "type": "string" },
+            "probability": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        }
+      }
+    },
+    "bubble_config": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "icon": { "type": ["string", "null"] },
+        "sounds": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "templates": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "accessory_act": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string" },
+          "act_list": { "type": "array", "items": { "type": "string" } },
+          "acc_list": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "fallbacks": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "avatar_slots": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "capabilities": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

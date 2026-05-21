@@ -1,0 +1,39 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Xcode / Swift
+DerivedData/
+.build/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+Package.resolved
+xcuserdata/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+.env
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+dist/
+build/
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Local state
+logs/
+tmp/
+*.sqlite3
+*.sqlite3-journal

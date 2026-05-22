@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class IntentKind(StrEnum):
     SHOW_PET_BUBBLE = "show_pet_bubble"
+    UPDATE_PET_BUBBLE = "update_pet_bubble"
     DISMISS_PET_BUBBLE = "dismiss_pet_bubble"
     SET_PET_ANIMATION = "set_pet_animation"
     SET_AVATAR_MOOD = "set_avatar_mood"

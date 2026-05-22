@@ -22,6 +22,7 @@ from pathlib import Path
 from .app import App, AppConfig
 from .bridge import default_socket_path
 from .logging_setup import configure_logging, get_logger
+from .skills import default_llm_prewarm
 
 _LOG = get_logger("deskmate_agent.main")
 
@@ -63,7 +64,7 @@ async def run() -> None:
         db_dir=default_db_dir(),
         codex_app_server_enabled=_codex_app_server_enabled(),
     )
-    app = App(config)
+    app = App(config, llm_prewarm=default_llm_prewarm)
     runtime = await app.setup()
     _LOG.info(
         "deskmate_agent.started",

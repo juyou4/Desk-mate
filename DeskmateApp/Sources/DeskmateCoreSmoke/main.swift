@@ -657,6 +657,128 @@ runner.test("bq: overflow evicts lowest priority oldest") {
     try runner.expect(q.count == 3, "queue over capacity: \(q.count)")
 }
 
+// --- V10 L3-B1: streaming bubble updates ------------------------------------
+
+runner.test("bq: update rewrites existing entry text") {
+    var q = BubbleQueue(maxActive: 4)
+    q.enqueue(mkBubble("reply"), nowMs: 100)
+    let patched = q.update(id: "reply", text: "hello", nowMs: 110)
+    try runner.expect(patched, "update should report a hit")
+    try runner.expect(q.peek(nowMs: 120)?.text == "hello", "text not patched")
+}
+
+runner.test("bq: update preserves enqueue order vs newer entries") {
+    var q = BubbleQueue(maxActive: 5)
+    q.enqueue(mkBubble("a"), nowMs: 100)
+    q.enqueue(mkBubble("b"), nowMs: 200)
+    _ = q.update(id: "a", text: "patched", nowMs: 250)
+    let next = q.dequeue(nowMs: 300)
+    try runner.expect(next?.id == "a", "patched 'a' should still lead FIFO order")
+    try runner.expect(next?.text == "patched", "text mismatch after update")
+}
+
+runner.test("bq: update miss returns false and is a no-op") {
+    var q = BubbleQueue(maxActive: 4)
+    q.enqueue(mkBubble("only"), nowMs: 100)
+    let patched = q.update(id: "ghost", text: "noop", nowMs: 110)
+    try runner.expect(!patched, "update should miss")
+    try runner.expect(q.peek(nowMs: 120)?.id == "only", "queue mutated unexpectedly")
+}
+
+runner.test("bq: update with refreshTtl postpones expiry") {
+    var q = BubbleQueue(maxActive: 4)
+    q.enqueue(mkBubble("late", ttl: 100), nowMs: 0)
+    _ = q.update(id: "late", text: "still here", nowMs: 80, refreshTtl: true)
+    try runner.expect(q.peek(nowMs: 150)?.id == "late", "ttl should be pushed forward")
+}
+
+// --- V10 L3-B1: CompanionIntentDispatcher patch decoding --------------------
+
+runner.test("intent: decodeBubblePatch parses bubble_id + text") {
+    let intent = CompanionIntent(
+        kind: .updatePetBubble,
+        payload: [
+            "bubble_id": .string("reply"),
+            "text": .string("hello"),
+        ]
+    )
+    let patch = try CompanionIntentDispatcher.decodeBubblePatch(from: intent)
+    try runner.expect(patch.bubbleId == "reply", "bubble_id mismatch")
+    try runner.expect(patch.text == "hello", "text mismatch")
+    try runner.expect(patch.markdown == nil, "markdown should default nil")
+}
+
+runner.test("intent: decodeBubblePatch surfaces missing fields") {
+    let missingId = CompanionIntent(
+        kind: .updatePetBubble,
+        payload: ["text": .string("hi")]
+    )
+    do {
+        _ = try CompanionIntentDispatcher.decodeBubblePatch(from: missingId)
+        try runner.expect(false, "should have thrown for missing bubble_id")
+    } catch {
+        // expected
+    }
+    let missingText = CompanionIntent(
+        kind: .updatePetBubble,
+        payload: ["bubble_id": .string("reply")]
+    )
+    do {
+        _ = try CompanionIntentDispatcher.decodeBubblePatch(from: missingText)
+        try runner.expect(false, "should have thrown for missing text")
+    } catch {
+        // expected
+    }
+}
+
+runner.test("intent: bindBubbleQueue routes update_pet_bubble to queue.update") {
+    let queue = LiveBubbleQueue(maxActive: 4)
+    let dispatcher = CompanionIntentDispatcher()
+    var decodeErrors: [Error] = []
+    dispatcher.bindBubbleQueue(to: queue) { decodeErrors.append($0) }
+
+    queue.enqueue(BubbleSpec(id: "reply", kind: .chat, text: "…", ttlMs: 30_000))
+
+    let firstToken = CompanionIntent(
+        kind: .updatePetBubble,
+        payload: [
+            "bubble_id": .string("reply"),
+            "text": .string("Hel"),
+        ]
+    )
+    _ = dispatcher.dispatch(firstToken)
+    try runner.expect(queue.peek()?.text == "Hel", "first token not patched")
+
+    let secondToken = CompanionIntent(
+        kind: .updatePetBubble,
+        payload: [
+            "bubble_id": .string("reply"),
+            "text": .string("Hello!"),
+        ]
+    )
+    _ = dispatcher.dispatch(secondToken)
+    try runner.expect(queue.peek()?.text == "Hello!", "second token not patched")
+    try runner.expect(decodeErrors.isEmpty, "no decode errors expected: \(decodeErrors)")
+}
+
+runner.test("intent: update for missing bubble id reports decode error") {
+    let queue = LiveBubbleQueue(maxActive: 4)
+    let dispatcher = CompanionIntentDispatcher()
+    var errorCount = 0
+    dispatcher.bindBubbleQueue(to: queue) { _ in errorCount += 1 }
+
+    let ghost = CompanionIntent(
+        kind: .updatePetBubble,
+        payload: [
+            "bubble_id": .string("never-shown"),
+            "text": .string("oops"),
+        ]
+    )
+    _ = dispatcher.dispatch(ghost)
+    try runner.expect(errorCount == 1, "expected 1 decode error, got \(errorCount)")
+    try runner.expect(queue.isEmpty, "queue should remain empty")
+}
+
 // --- Phase 2b: PetWindowGeometry (L2-#1) ------------------------------------
 
 runner.test("geo: origin inside screen is preserved") {

@@ -54,6 +54,28 @@ public final class LiveBubbleQueue {
         if queue.count != before { notify() }
     }
 
+    /// Replace the text of the bubble whose ``id`` matches. Returns
+    /// ``true`` when a live entry was patched, ``false`` when no
+    /// matching entry exists (caller may decide to enqueue a fresh
+    /// bubble in that case). Used by V10 L3-B1 streaming chat.
+    @discardableResult
+    public func update(
+        id: String,
+        text: String,
+        markdown: String? = nil,
+        refreshTtl: Bool = false
+    ) -> Bool {
+        let patched = queue.update(
+            id: id,
+            text: text,
+            markdown: markdown,
+            nowMs: clock(),
+            refreshTtl: refreshTtl
+        )
+        if patched { notify() }
+        return patched
+    }
+
     @discardableResult
     public func dequeue() -> BubbleSpec? {
         guard let spec = queue.dequeue(nowMs: clock()) else { return nil }

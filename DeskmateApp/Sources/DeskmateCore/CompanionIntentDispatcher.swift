@@ -103,8 +103,8 @@ extension CompanionIntentDispatcher {
 // MARK: - Convenience: BubbleQueue binding
 
 extension CompanionIntentDispatcher {
-    /// Install handlers for ``SHOW_PET_BUBBLE`` and
-    /// ``DISMISS_PET_BUBBLE`` intents, routing them into ``queue``.
+    /// Install handlers for ``SHOW_PET_BUBBLE``, ``UPDATE_PET_BUBBLE``,
+    /// and ``DISMISS_PET_BUBBLE`` intents, routing them into ``queue``.
     /// Malformed payloads are reported via ``onDecodeError`` instead of
     /// crashing the dispatcher.
     public func bindBubbleQueue(
@@ -116,6 +116,33 @@ extension CompanionIntentDispatcher {
             do {
                 let spec = try Self.decodeBubbleSpec(from: intent)
                 queue.enqueue(spec)
+            } catch {
+                onDecodeError?(error)
+            }
+        }
+        register(kind: .updatePetBubble) { [weak queue] intent in
+            guard let queue else { return }
+            do {
+                let patch = try Self.decodeBubblePatch(from: intent)
+                let applied = queue.update(
+                    id: patch.bubbleId,
+                    text: patch.text,
+                    markdown: patch.markdown
+                )
+                if !applied {
+                    // V10 L3-B1 fail-soft: a token update for a bubble
+                    // that already aged out (TTL elapsed, user
+                    // dismissed) is a no-op. The streaming source
+                    // should re-emit a ``show_pet_bubble`` if it
+                    // wants to revive the conversation.
+                    onDecodeError?(DecodingError.dataCorrupted(
+                        .init(
+                            codingPath: [],
+                            debugDescription:
+                                "update_pet_bubble id not in queue: \(patch.bubbleId)"
+                        )
+                    ))
+                }
             } catch {
                 onDecodeError?(error)
             }
@@ -153,6 +180,42 @@ extension CompanionIntentDispatcher {
         }
         let data = try JSONEncoder().encode(raw)
         return try JSONDecoder().decode(BubbleSpec.self, from: data)
+    }
+
+    public struct BubblePatch: Equatable, Sendable {
+        public let bubbleId: String
+        public let text: String
+        public let markdown: String?
+    }
+
+    /// Decode a streaming patch payload (``bubble_id`` + ``text``)
+    /// for ``update_pet_bubble``.
+    public static func decodeBubblePatch(
+        from intent: CompanionIntent
+    ) throws -> BubblePatch {
+        guard case .string(let bubbleId)? = intent.payload["bubble_id"] else {
+            throw DecodingError.typeMismatch(
+                String.self,
+                .init(
+                    codingPath: [],
+                    debugDescription: "update_pet_bubble payload missing bubble_id"
+                )
+            )
+        }
+        guard case .string(let text)? = intent.payload["text"] else {
+            throw DecodingError.typeMismatch(
+                String.self,
+                .init(
+                    codingPath: [],
+                    debugDescription: "update_pet_bubble payload missing text"
+                )
+            )
+        }
+        var markdown: String? = nil
+        if case .string(let md)? = intent.payload["markdown"] {
+            markdown = md
+        }
+        return BubblePatch(bubbleId: bubbleId, text: text, markdown: markdown)
     }
 
     private enum BubbleSpecCodingKey: String, CodingKey {

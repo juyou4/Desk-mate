@@ -15,8 +15,9 @@ instructions like ``pet.speak``; only intents cross the boundary.
 
 from __future__ import annotations
 
+import inspect
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 
 from .context import PerceptionSnapshot, ProactiveContext
@@ -37,6 +38,18 @@ IntentSink = Callable[[CompanionIntent], Awaitable[None]]
 # still gets visible feedback. Skill-level adapters (LLM, rules,
 # canned) all plug in through this single seam.
 ReplyComposer = Callable[[str], Awaitable[str | None]]
+
+# V10 L3-B1 streaming composer. Returns an async iterator that
+# yields ``str`` tokens (or partial chunks of any size). The
+# dispatcher accumulates them into the bubble's ``text`` field via
+# UPDATE_PET_BUBBLE intents, throttled to ~50ms windows so a fast
+# token stream doesn't blow past V10 L3-A9's bubble update budget.
+StreamingReplyComposer = Callable[[str], AsyncIterator[str]]
+
+# V10 L3-A9 / L3-B1: minimum interval between UPDATE_PET_BUBBLE
+# emissions for the same in-flight reply bubble. Tokens that arrive
+# within the window get coalesced into the next emission.
+_STREAM_FLUSH_INTERVAL_MS = 50
 
 # V10 Phase 13-i: side-channel observer invoked once per
 # :meth:`Dispatcher.on_perception_tick`. Skills that react to OS
@@ -76,10 +89,14 @@ class Dispatcher:
         perception_observers: list[PerceptionObserver] | None = None,
         nudge_selector: NudgeSelector | None = None,
         perception_deduper: PerceptionDeduper | None = None,
+        streaming_reply_composer: StreamingReplyComposer | None = None,
+        stream_flush_interval_ms: int = _STREAM_FLUSH_INTERVAL_MS,
     ) -> None:
         self._proactive = proactive
         self._sink = intent_sink
         self._reply_composer = reply_composer
+        self._streaming_composer = streaming_reply_composer
+        self._stream_flush_interval_ms = max(0, int(stream_flush_interval_ms))
         self._perception_observers = list(perception_observers or [])
         self._nudge_selector = nudge_selector
         # V10 Phase 9 · §4 step 3: optional deduper that drops
@@ -113,11 +130,16 @@ class Dispatcher:
         1. Kick off the ``thinking`` animation.
         2. Emit a placeholder ``"…"`` bubble **immediately** so the
            user sees instant feedback regardless of composer latency.
-        3. If a composer is plugged in, await it. When it produces a
-           reply, atomically swap the placeholder for the real reply
-           bubble (DISMISS then SHOW). When it returns ``None``, the
-           placeholder remains — its TTL eventually retires it.
-        4. With no composer the placeholder is the final state.
+        3. If a streaming composer is plugged in, await its first
+           token, swap the placeholder for a real reply bubble
+           carrying that token, and stream subsequent tokens into
+           the same bubble id via ``UPDATE_PET_BUBBLE`` intents.
+           Coalesce updates into ~50 ms windows so a fast LLM
+           doesn't blow past V10 L3-A9's bubble update budget.
+        4. Otherwise, if a non-streaming composer is plugged in,
+           await it and atomically swap the placeholder for the
+           full reply.
+        5. With no composer the placeholder is the final state.
         """
         self.stats.user_messages += 1
 
@@ -147,20 +169,27 @@ class Dispatcher:
             )
         )
 
-        # 3. No composer → placeholder is the whole interaction.
+        # 3. Streaming path wins when both are configured: the
+        # canned-fallback case in :func:`make_default_composer`
+        # already wires the streaming composer's fallback to the
+        # canned non-streaming one.
+        if self._streaming_composer is not None:
+            await self._stream_reply(text, ack_id=ack_id, trace_id=trace_id)
+            return
+
+        # 4. No streaming composer → original full-await path.
         if self._reply_composer is None:
             return
 
-        # 4. Await the composer. Any of (None, "", whitespace) keeps
-        # the placeholder — not worth the visual churn.
         reply = await self._reply_composer(text)
         if not reply:
             return
 
-        # 5. Atomic swap: dismiss placeholder THEN show the real reply.
+        # Atomic swap: dismiss placeholder THEN show the real reply.
         # Separate ``bubble_id`` lets Swift's ``LivePendingBubbleQueue``
-        # identify the outgoing entry — same-id replacement isn't a
-        # thing at the queue layer by design.
+        # identify the outgoing entry — same-id replacement was added
+        # in V10 L3-B1 specifically for streaming, but the legacy
+        # full-reply path keeps using DISMISS+SHOW for clarity.
         await self._sink(
             CompanionIntent(
                 kind=IntentKind.DISMISS_PET_BUBBLE,
@@ -179,6 +208,125 @@ class Dispatcher:
             CompanionIntent(
                 kind=IntentKind.SHOW_PET_BUBBLE,
                 payload={"bubble": reply_bubble.model_dump(mode="json")},
+            )
+        )
+
+    async def _stream_reply(
+        self,
+        text: str,
+        *,
+        ack_id: str,
+        trace_id: str | None,
+    ) -> None:
+        """Drive the streaming reply chain (V10 L3-B1).
+
+        Strategy:
+
+        - Wait for the first token before dismissing the ack bubble
+          so a composer that fails before any token arrives leaves
+          the placeholder in place (its TTL retires it later).
+        - Coalesce subsequent tokens into ~50 ms windows.
+        - Always emit a final ``UPDATE_PET_BUBBLE`` with the full
+          accumulated text so the bubble settles on the complete
+          reply even if the last window's batch was small.
+        """
+        assert self._streaming_composer is not None  # narrowed for mypy
+        reply_id = "user-msg-reply"
+
+        accumulated: list[str] = []
+        first_token: str | None = None
+        try:
+            stream = self._streaming_composer(text)
+            if inspect.isawaitable(stream):
+                # Composer returned an awaitable that resolves to an
+                # iterator (some skill adapters do this for warm-up
+                # plumbing). Await once before iterating.
+                stream = await stream  # type: ignore[assignment]
+            iterator = stream.__aiter__()
+            while True:
+                try:
+                    chunk = await iterator.__anext__()
+                except StopAsyncIteration:
+                    break
+                if chunk is None:
+                    continue
+                text_chunk = str(chunk)
+                if not text_chunk:
+                    continue
+                if first_token is None:
+                    first_token = text_chunk
+                    accumulated.append(text_chunk)
+                    # Swap placeholder → real reply bubble carrying
+                    # the first token. From here on we patch in
+                    # place via UPDATE_PET_BUBBLE.
+                    await self._sink(
+                        CompanionIntent(
+                            kind=IntentKind.DISMISS_PET_BUBBLE,
+                            payload={"bubble_id": ack_id},
+                        )
+                    )
+                    reply_bubble = BubbleSpec(
+                        id=reply_id,
+                        kind=BubbleKind.CHAT,
+                        text="".join(accumulated),
+                        ttl_ms=8_000,
+                        priority=Priority.P2,
+                        source_event_id=(trace_id or None),
+                    )
+                    await self._sink(
+                        CompanionIntent(
+                            kind=IntentKind.SHOW_PET_BUBBLE,
+                            payload={"bubble": reply_bubble.model_dump(mode="json")},
+                        )
+                    )
+                    last_flush_ms = int(time.time() * 1000)
+                    continue
+
+                accumulated.append(text_chunk)
+                now_ms = int(time.time() * 1000)
+                if now_ms - last_flush_ms >= self._stream_flush_interval_ms:
+                    await self._emit_bubble_patch(
+                        bubble_id=reply_id,
+                        text="".join(accumulated),
+                    )
+                    last_flush_ms = now_ms
+        except Exception as exc:  # noqa: BLE001 — fail-soft, log and bail
+            _LOGGER.warning(
+                "dispatcher.streaming_composer_error",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+
+        if first_token is None:
+            # No tokens at all — leave the placeholder, its TTL will
+            # retire it. (The streaming composer's fallback path
+            # should have already emitted a non-empty stream when
+            # falling back to the canned composer.)
+            return
+
+        final_text = "".join(accumulated)
+        # Always emit the final state, even if it equals the last
+        # patched text — this is the "settled reply" Swift relies on
+        # to know the stream is done. Cheap; the queue's update is
+        # a no-op when the entry has aged out.
+        await self._emit_bubble_patch(
+            bubble_id=reply_id,
+            text=final_text,
+        )
+
+    async def _emit_bubble_patch(
+        self,
+        *,
+        bubble_id: str,
+        text: str,
+    ) -> None:
+        await self._sink(
+            CompanionIntent(
+                kind=IntentKind.UPDATE_PET_BUBBLE,
+                payload={
+                    "bubble_id": bubble_id,
+                    "text": text,
+                },
             )
         )
 
@@ -291,4 +439,10 @@ class Dispatcher:
         return result
 
 
-__all__ = ["Dispatcher", "DispatchStats", "IntentSink"]
+__all__ = [
+    "Dispatcher",
+    "DispatchStats",
+    "IntentSink",
+    "ReplyComposer",
+    "StreamingReplyComposer",
+]

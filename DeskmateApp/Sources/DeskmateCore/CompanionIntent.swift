@@ -8,6 +8,7 @@ import Foundation
 /// side remains free to change views without touching the protocol.
 public enum IntentKind: String, Codable, Sendable, CaseIterable {
     case showPetBubble = "show_pet_bubble"
+    case updatePetBubble = "update_pet_bubble"
     case dismissPetBubble = "dismiss_pet_bubble"
     case setPetAnimation = "set_pet_animation"
     case setAvatarMood = "set_avatar_mood"

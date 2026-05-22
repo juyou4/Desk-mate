@@ -43,6 +43,8 @@ def _build_dispatcher(
     nudge_selector=None,
     perception_observers=None,
     perception_deduper: PerceptionDeduper | None = None,
+    streaming_composer=None,
+    stream_flush_interval_ms: int = 50,
 ) -> tuple[Dispatcher, list[CompanionIntent]]:
     captured: list[CompanionIntent] = []
 
@@ -63,6 +65,8 @@ def _build_dispatcher(
             nudge_selector=nudge_selector,
             perception_observers=perception_observers,
             perception_deduper=perception_deduper,
+            streaming_reply_composer=streaming_composer,
+            stream_flush_interval_ms=stream_flush_interval_ms,
         ),
         captured,
     )
@@ -358,3 +362,157 @@ async def test_proactive_charges_cooldown_once_fired() -> None:
     result = await dispatcher.on_perception_tick(_ctx())
     assert result.should_trigger is False
     assert result.reason.startswith("rule:cooldown")
+
+
+# ---------------------------------------------------------------------------
+# V10 L3-B1: streaming reactive chain
+# ---------------------------------------------------------------------------
+
+
+def _make_token_stream(tokens: list[str]):
+    """Build a no-arg-friendly streaming composer that yields tokens
+    in order and then exits cleanly."""
+
+    async def compose(text: str):
+        for tok in tokens:
+            yield tok
+
+    return compose
+
+
+@pytest.mark.asyncio
+async def test_streaming_composer_emits_first_token_via_swap_then_patches() -> None:
+    """Streaming path:
+
+    1. SET_PET_ANIMATION thinking
+    2. SHOW_PET_BUBBLE ack
+    3. DISMISS_PET_BUBBLE ack (after first token)
+    4. SHOW_PET_BUBBLE reply with first token
+    5. UPDATE_PET_BUBBLE for each subsequent token (or coalesced batch)
+    6. Final UPDATE_PET_BUBBLE carries the fully accumulated text.
+    """
+
+    composer = _make_token_stream(["He", "llo", " world"])
+    dispatcher, captured = _build_dispatcher(
+        _NeverEngine(),
+        streaming_composer=composer,
+        # 0ms flush so every token gets its own UPDATE_PET_BUBBLE,
+        # making the order easy to assert.
+        stream_flush_interval_ms=0,
+    )
+
+    await dispatcher.on_user_message("hi")
+
+    kinds = [c.kind for c in captured]
+    # Must start with the standard ack handshake.
+    assert kinds[0] is IntentKind.SET_PET_ANIMATION
+    assert kinds[1] is IntentKind.SHOW_PET_BUBBLE
+    assert captured[1].payload["bubble"]["id"] == "user-msg-ack"
+
+    # First token must DISMISS the ack and SHOW the reply bubble.
+    assert kinds[2] is IntentKind.DISMISS_PET_BUBBLE
+    assert captured[2].payload["bubble_id"] == "user-msg-ack"
+    assert kinds[3] is IntentKind.SHOW_PET_BUBBLE
+    reply_first = captured[3].payload["bubble"]
+    assert reply_first["id"] == "user-msg-reply"
+    assert reply_first["text"] == "He"
+
+    # Every subsequent token (and the final settle) is an UPDATE_PET_BUBBLE.
+    update_payloads = [
+        c.payload for c in captured if c.kind is IntentKind.UPDATE_PET_BUBBLE
+    ]
+    update_texts = [p["text"] for p in update_payloads]
+    # Texts must be monotonically lengthening (never shrink) and end with
+    # the fully accumulated reply.
+    assert all(p["bubble_id"] == "user-msg-reply" for p in update_payloads)
+    assert update_texts == sorted(update_texts, key=len), update_texts
+    assert update_texts[-1] == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_streaming_composer_yielding_nothing_keeps_placeholder() -> None:
+    """A streaming composer that completes without yielding a single
+    token must leave the placeholder bubble in place (its TTL retires
+    it) and never emit a DISMISS / UPDATE for the reply bubble."""
+
+    composer = _make_token_stream([])
+    dispatcher, captured = _build_dispatcher(
+        _NeverEngine(),
+        streaming_composer=composer,
+    )
+
+    await dispatcher.on_user_message("hi")
+
+    kinds = [c.kind for c in captured]
+    assert kinds == [IntentKind.SET_PET_ANIMATION, IntentKind.SHOW_PET_BUBBLE]
+    assert all(k is not IntentKind.DISMISS_PET_BUBBLE for k in kinds)
+    assert all(k is not IntentKind.UPDATE_PET_BUBBLE for k in kinds)
+
+
+@pytest.mark.asyncio
+async def test_streaming_composer_failure_after_first_token_emits_partial_reply() -> None:
+    """A composer that raises mid-stream must not crash the dispatcher;
+    the partial reply already emitted stays visible and the final settle
+    update lands."""
+
+    async def compose(text: str):
+        yield "Hel"
+        raise RuntimeError("simulated network blip")
+
+    dispatcher, captured = _build_dispatcher(
+        _NeverEngine(),
+        streaming_composer=compose,
+        stream_flush_interval_ms=0,
+    )
+
+    await dispatcher.on_user_message("hi")
+
+    update_texts = [
+        c.payload["text"]
+        for c in captured
+        if c.kind is IntentKind.UPDATE_PET_BUBBLE
+    ]
+    # Must contain at least the final settle carrying the partial reply.
+    assert update_texts, "expected at least one UPDATE_PET_BUBBLE"
+    assert update_texts[-1] == "Hel"
+
+    # Reply bubble was created with the first token.
+    show_intents = [
+        c for c in captured if c.kind is IntentKind.SHOW_PET_BUBBLE
+    ]
+    assert any(
+        s.payload["bubble"]["id"] == "user-msg-reply"
+        for s in show_intents
+    )
+
+
+@pytest.mark.asyncio
+async def test_streaming_composer_takes_priority_over_non_streaming() -> None:
+    """When both composers are wired, the streaming one wins. The
+    non-streaming composer must never be called."""
+
+    sync_calls = []
+
+    async def sync_compose(text: str) -> str | None:
+        sync_calls.append(text)
+        return "should not appear"
+
+    streaming = _make_token_stream(["streaming reply"])
+
+    dispatcher, captured = _build_dispatcher(
+        _NeverEngine(),
+        composer=sync_compose,
+        streaming_composer=streaming,
+        stream_flush_interval_ms=0,
+    )
+
+    await dispatcher.on_user_message("hi")
+
+    assert sync_calls == [], "non-streaming composer must not be invoked"
+    show_payloads = [
+        c.payload["bubble"]
+        for c in captured
+        if c.kind is IntentKind.SHOW_PET_BUBBLE
+    ]
+    reply = next(s for s in show_payloads if s["id"] == "user-msg-reply")
+    assert reply["text"] == "streaming reply"

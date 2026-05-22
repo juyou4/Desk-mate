@@ -85,6 +85,35 @@ public struct BubbleQueue: Equatable, Sendable {
         entries.removeAll { $0.spec.id == id }
     }
 
+    /// Replace the ``text`` (and optional ``markdown``) of the entry whose
+    /// spec id matches, **without** changing its priority, ttl, or insertion
+    /// order. Returns ``true`` when an entry was actually patched.
+    ///
+    /// Used by V10 L3-B1 streaming chat: the dispatcher keeps the same
+    /// ``user-msg-reply`` bubble id alive across UPDATE_PET_BUBBLE intents
+    /// and just rewrites its text as tokens arrive. Callers that need to
+    /// also reset the TTL on each token can pass ``refreshTtl: true``.
+    @discardableResult
+    public mutating func update(
+        id: String,
+        text: String,
+        markdown: String? = nil,
+        nowMs: Int = 0,
+        refreshTtl: Bool = false
+    ) -> Bool {
+        guard let idx = entries.firstIndex(where: { $0.spec.id == id })
+        else { return false }
+        let previous = entries[idx]
+        var spec = previous.spec
+        spec.text = text
+        if markdown != nil {
+            spec.markdown = markdown
+        }
+        let nextEnqueuedAt = refreshTtl ? max(nowMs, previous.enqueuedAtMs) : previous.enqueuedAtMs
+        entries[idx] = Entry(spec: spec, enqueuedAtMs: nextEnqueuedAt)
+        return true
+    }
+
     public mutating func clear() {
         entries.removeAll()
     }

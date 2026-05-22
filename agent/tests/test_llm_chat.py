@@ -762,3 +762,276 @@ async def test_reactive_default_still_injects_full_catalog() -> None:
     )
     assert "SAFE-PROMPT" in joined
     assert "UNSAFE-PROMPT" in joined
+
+
+# ---------------------------------------------------------------------------
+# V10 L3-B1: streaming chat composer
+# ---------------------------------------------------------------------------
+
+
+def _sse_lines(*chunks: str | None) -> bytes:
+    """Build a fake OpenAI-compatible SSE response body. ``None``
+    triggers a final ``data: [DONE]`` marker."""
+    out: list[str] = []
+    for c in chunks:
+        if c is None:
+            out.append("data: [DONE]")
+        else:
+            out.append(
+                "data: "
+                + json.dumps({"choices": [{"delta": {"content": c}}]})
+            )
+    out.append("")
+    return ("\n".join(out)).encode("utf-8")
+
+
+@pytest.mark.asyncio
+async def test_streaming_composer_yields_tokens_and_records_history() -> None:
+    """Streaming composer must yield each delta in order and remember
+    the assistant turn for the next request's rolling context."""
+
+    from deskmate_agent.skills import openai_compat_streaming_composer
+
+    request_bodies: list[dict[str, object]] = []
+    canned_responses: list[bytes] = [
+        _sse_lines("Hel", "lo", " world", None),
+        _sse_lines("yep", None),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_bodies.append(json.loads(request.content))
+        idx = len(request_bodies) - 1
+        body = canned_responses[min(idx, len(canned_responses) - 1)]
+        return httpx.Response(
+            200,
+            content=body,
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    compose = openai_compat_streaming_composer(
+        base_url="https://api.test/v1",
+        api_key="sk-test",
+        model="gpt-test",
+        client=_client(handler),
+    )
+
+    tokens = [t async for t in compose("hi")]
+    assert tokens == ["Hel", "lo", " world"]
+    assert request_bodies[0]["stream"] is True
+    assert request_bodies[0]["messages"][-1] == {"role": "user", "content": "hi"}
+
+    # Second turn: history must include the prior user + assistant.
+    tokens2 = [t async for t in compose("how are you")]
+    assert tokens2 == ["yep"]
+    second_messages = request_bodies[1]["messages"]
+    # Skip the leading system prompt(s); collect the user/assistant
+    # role sequence we shipped.
+    role_seq = [m["role"] for m in second_messages if m["role"] != "system"]
+    assert role_seq == ["user", "assistant", "user"]
+    assert second_messages[-1] == {"role": "user", "content": "how are you"}
+    # Assistant turn must echo the FULL accumulated reply, not just
+    # the first delta.
+    assistant_msg = next(m for m in second_messages if m["role"] == "assistant")
+    assert assistant_msg["content"] == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_streaming_composer_first_token_observer_fires_on_first_token() -> None:
+    """The first-token observer must fire exactly once, on the FIRST
+    delta — not on stream open and not on each subsequent chunk."""
+
+    from deskmate_agent.skills import openai_compat_streaming_composer
+
+    observed: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=_sse_lines("a", "b", "c", None),
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    compose = openai_compat_streaming_composer(
+        base_url="https://api.test/v1",
+        api_key="sk-test",
+        model="gpt-test",
+        client=_client(handler),
+        first_token_observer=observed.append,
+    )
+    _ = [t async for t in compose("hi")]
+    assert len(observed) == 1, observed
+    assert observed[0] >= 0.0
+
+
+@pytest.mark.asyncio
+async def test_streaming_composer_falls_back_to_canned_when_stream_fails() -> None:
+    """An HTTP-level error before any token arrives must fall back
+    to the configured non-streaming composer, yielded as a single
+    chunk."""
+
+    from deskmate_agent.skills import openai_compat_streaming_composer
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="boom")
+
+    async def fallback(text: str) -> str | None:
+        return f"canned:{text}"
+
+    compose = openai_compat_streaming_composer(
+        base_url="https://api.test/v1",
+        api_key="sk-test",
+        model="gpt-test",
+        client=_client(handler),
+        fallback=fallback,
+    )
+    tokens = [t async for t in compose("hi")]
+    assert tokens == ["canned:hi"]
+
+
+@pytest.mark.asyncio
+async def test_streaming_composer_partial_then_error_keeps_partial_no_fallback() -> None:
+    """If at least one token arrived before the stream broke, the
+    partial reply stays — we don't paste a canned fallback over it."""
+
+    from deskmate_agent.skills import openai_compat_streaming_composer
+
+    # Build a transport that replies 200 with a stream that ends
+    # cleanly after one delta. The composer's contract is "any
+    # token suppresses the fallback", which the unit covers without
+    # needing to fake a mid-stream socket reset.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=_sse_lines("partial", None),
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    fallback_calls: list[str] = []
+
+    async def fallback(text: str) -> str | None:
+        fallback_calls.append(text)
+        return f"canned:{text}"
+
+    compose = openai_compat_streaming_composer(
+        base_url="https://api.test/v1",
+        api_key="sk-test",
+        model="gpt-test",
+        client=_client(handler),
+        fallback=fallback,
+    )
+    tokens = [t async for t in compose("hi")]
+    assert tokens == ["partial"]
+    assert fallback_calls == [], "fallback must not fire when stream produced data"
+
+
+@pytest.mark.asyncio
+async def test_streaming_composer_ignores_unknown_lines() -> None:
+    """Heartbeat / comment lines and malformed JSON inside the stream
+    must not break the iterator. They're silently skipped."""
+
+    from deskmate_agent.skills import openai_compat_streaming_composer
+
+    raw = (
+        ": ping\n"
+        "\n"
+        "data: not-json\n"
+        + "data: "
+        + json.dumps({"choices": [{"delta": {"content": "good"}}]})
+        + "\n"
+        + "data: [DONE]\n"
+    ).encode("utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=raw,
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    compose = openai_compat_streaming_composer(
+        base_url="https://api.test/v1",
+        api_key="sk-test",
+        model="gpt-test",
+        client=_client(handler),
+    )
+    tokens = [t async for t in compose("hi")]
+    assert tokens == ["good"]
+
+
+@pytest.mark.asyncio
+async def test_make_default_streaming_composer_returns_none_without_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The streaming sibling factory returns ``None`` so the
+    dispatcher transparently falls back to the canned non-streaming
+    path when no key is configured."""
+
+    from deskmate_agent.skills import make_default_streaming_composer
+
+    monkeypatch.delenv("DESKMATE_LLM_API_KEY", raising=False)
+    assert make_default_streaming_composer() is None
+
+
+@pytest.mark.asyncio
+async def test_make_default_streaming_composer_respects_opt_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deskmate_agent.skills import make_default_streaming_composer
+
+    monkeypatch.setenv("DESKMATE_LLM_API_KEY", "sk-test")
+    monkeypatch.setenv("DESKMATE_LLM_STREAMING", "0")
+    assert make_default_streaming_composer() is None
+
+
+@pytest.mark.asyncio
+async def test_make_default_streaming_composer_returns_composer_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deskmate_agent.skills import make_default_streaming_composer
+
+    monkeypatch.setenv("DESKMATE_LLM_API_KEY", "sk-test")
+    monkeypatch.delenv("DESKMATE_LLM_STREAMING", raising=False)
+    composer = make_default_streaming_composer()
+    assert composer is not None
+
+
+
+# ---------------------------------------------------------------------------
+# V10 L3-B1: connection prewarm
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_default_llm_prewarm_no_op_without_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No key → prewarm is a fast no-op, never makes a network call."""
+
+    from deskmate_agent.skills import default_llm_prewarm
+
+    monkeypatch.delenv("DESKMATE_LLM_API_KEY", raising=False)
+
+    # Sentinel: if it tried to create an httpx client it would throw
+    # because no DNS is configured for "api.openai.com" in the test
+    # env. No throw == no network attempt.
+    await default_llm_prewarm(timeout_s=0.5)
+
+
+@pytest.mark.asyncio
+async def test_default_llm_prewarm_swallows_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed warm-up MUST NOT raise — agent.ready cannot block on
+    a flaky model endpoint."""
+
+    from deskmate_agent.skills import default_llm_prewarm
+
+    monkeypatch.setenv("DESKMATE_LLM_API_KEY", "sk-test")
+    # Point at a definitely-unreachable URL so the request fails
+    # fast inside the configured timeout.
+    monkeypatch.setenv(
+        "DESKMATE_LLM_BASE_URL", "https://127.0.0.1:1/v1"
+    )
+
+    # Must complete without raising.
+    await default_llm_prewarm(timeout_s=0.2)

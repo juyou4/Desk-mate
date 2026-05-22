@@ -88,6 +88,7 @@ from .skills import (
     CodingSessionTracker,
     SkillRegistry,
     make_default_composer,
+    make_default_streaming_composer,
     populate_default_registry,
 )
 
@@ -421,6 +422,13 @@ class App:
             # intent sink / bridge / Swift UI are all unchanged across
             # both modes — the skill seam is a single async callable.
             reply_composer=make_default_composer(
+                skill_registry=skill_registry
+            ),
+            # V10 L3-B1: when the LLM key is configured (and
+            # ``DESKMATE_LLM_STREAMING`` is not opt-out'd), the
+            # streaming composer wins inside ``Dispatcher`` and
+            # tokens land via ``UPDATE_PET_BUBBLE`` intents.
+            streaming_reply_composer=make_default_streaming_composer(
                 skill_registry=skill_registry
             ),
             # Phase 13-i: observe perception ticks so the island

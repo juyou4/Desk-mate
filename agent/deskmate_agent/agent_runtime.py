@@ -5,19 +5,48 @@ It observes local processes and turns them into lightweight runtime
 sessions so the island/session list can show that Codex, Claude Code,
 Cursor, Windsurf, VSCode, etc. are alive even before a richer hook event
 arrives.
+
+Design notes
+~~~~~~~~~~~~
+
+* **Table-driven classifier.** Every supported runtime is a row in
+  :data:`_RUNTIME_PATTERNS`. Adding a new agent / IDE is a one-line
+  edit instead of a `if` ladder. The order of the table is the
+  match priority — more-specific patterns must come before
+  generic fallbacks (e.g. ``"node"`` interpreters running an
+  agent CLI script).
+* **Substring + executable matching.** The legacy logic only looked
+  at the executable basename, so a Homebrew shim like
+  ``node /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js``
+  fell through. We now also match against the full args line so an
+  interpreter spawning an agent's bundled JS / Python entry point
+  still classifies correctly.
+* **Electron helper dedupe.** Cursor / VSCode / Windsurf each spawn
+  4-8 ``Helper (Renderer)`` / ``Helper (GPU)`` children that should
+  fold into the parent application. We keep the topmost match per
+  ``(source, root pid)`` group and drop the rest, so the session
+  list shows one row per running IDE instead of a renderer swarm.
+* **Best-effort workspace hint.** Cursor / VSCode / Windsurf are
+  often launched with the workspace path either as the last
+  positional arg or as ``--folder-uri file://...``. We pluck the
+  hint into ``cwd`` so the menu-bar "Jump to session" path can
+  open the folder; ``None`` is the safe default when nothing
+  obvious is in the args.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -35,15 +64,49 @@ class AgentRuntimeKind(StrEnum):
 
 
 class AgentRuntimeSource(StrEnum):
+    """Stable identifier for the runtime that produced a session row.
+
+    Kept as a flat enum so Swift / Python share one wire string.
+    Adding a new value requires:
+
+    1. A row in :data:`_RUNTIME_PATTERNS` (Python detects the
+       process).
+    2. (Optional) A pretty label in
+       :py:meth:`SessionRow.sourceLabel` Swift switch — the default
+       branch already PrettyPrints unknown sources so this is only
+       needed when the auto-derived label is awkward.
+    """
+
+    # CLI agents
     CODEX = "codex"
     CLAUDE_CODE = "claude_code"
+    OPENCODE = "opencode"
+    AIDER = "aider"
+    GEMINI = "gemini"
+    KIMI = "kimi"
+    QWEN = "qwen"
+    FACTORY_DROID = "factory_droid"
+    CODEBUDDY = "codebuddy"
+    QODER = "qoder"
+
+    # GUI IDEs / editors
     CURSOR = "cursor"
     WINDSURF = "windsurf"
     VSCODE = "vscode"
     XCODE = "xcode"
     JETBRAINS = "jetbrains"
+    ZED = "zed"
+    TRAE = "trae"
+    SUBLIME = "sublime"
+    FLEET = "fleet"
+    NOVA = "nova"
+    NEOVIM = "neovim"
+    GITHUB_DESKTOP = "github_desktop"
+
+    # Terminals (often host CLI agents)
     TERMINAL = "terminal"
-    OPENCODE = "opencode"
+    WARP = "warp"
+
     UNKNOWN = "unknown"
 
 
@@ -81,6 +144,396 @@ class ProcessRow:
     ppid: int
     comm: str
     args: str
+
+
+# ---------------------------------------------------------------------------
+# Classifier
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _RuntimePattern:
+    """Single declarative entry in the classifier table.
+
+    Match semantics:
+
+    * If both ``executables`` and ``arg_needles`` are set,
+      matching is **either / or** by default — the exec or the
+      args may identify the runtime. This is what lets us list
+      ``Cursor.app`` as either an exec match (``cursor``) or an
+      args match (``cursor.app``) and accept both.
+    * Some rules genuinely need **both** to match, e.g.
+      ``node`` running ``@anthropic-ai/claude-code/cli.js`` —
+      neither half is unique on its own. Those rows set
+      ``require_all=True`` so we only fire when the executable
+      *and* an arg needle agree.
+    * ``avoid_needles`` is always a hard reject regardless of
+      ``require_all`` — used to keep ``code`` from picking up
+      ``code helper`` in the same regex pass before the dedupe
+      stage runs.
+    * ``executables`` and ``arg_needles`` are case-insensitive.
+    """
+
+    source: AgentRuntimeSource
+    kind: AgentRuntimeKind
+    display_name: str
+    executables: tuple[str, ...] = ()
+    arg_needles: tuple[str, ...] = ()
+    avoid_needles: tuple[str, ...] = ()
+    bundle_id: str | None = None
+    helper_needles: tuple[str, ...] = ()
+    """Args / comm substrings that mean *this is a renderer/helper*
+    spawned by the main app process. Helpers are dropped during
+    the dedupe pass — we only keep one session per IDE."""
+    require_all: bool = False
+    """When ``True``, the row only matches when BOTH ``executables``
+    and ``arg_needles`` produce a hit. Reserved for interpreter-
+    based runners (``node`` / ``python`` / ``bun`` shimming an
+    agent CLI) where neither field alone is unique."""
+
+
+# Table of supported runtimes. Order matters — patterns higher up
+# win over lower ones. We deliberately list the more specific
+# matchers (full bundle paths, npm shims) before the generic
+# ``executable in {...}`` rules.
+_RUNTIME_PATTERNS: tuple[_RuntimePattern, ...] = (
+    # --- CLI agents ---------------------------------------------------------
+    # Claude Code: Anthropic ships an npm-installed CLI that runs as
+    # ``node <prefix>/@anthropic-ai/claude-code/cli.js``. Match both
+    # the npm-resolved binary and the underlying interpreter path.
+    _RuntimePattern(
+        source=AgentRuntimeSource.CLAUDE_CODE,
+        kind=AgentRuntimeKind.CLI_AGENT,
+        display_name="Claude Code CLI",
+        executables=("claude", "claude-code"),
+    ),
+    _RuntimePattern(
+        source=AgentRuntimeSource.CLAUDE_CODE,
+        kind=AgentRuntimeKind.CLI_AGENT,
+        display_name="Claude Code CLI",
+        executables=("node", "bun", "deno"),
+        arg_needles=("@anthropic-ai/claude-code", "claude-code/cli", "claude-code/dist"),
+        require_all=True,
+    ),
+    # Codex CLI: official npm wrapper + the Rust rewrite that ships
+    # in the Codex desktop app.
+    _RuntimePattern(
+        source=AgentRuntimeSource.CODEX,
+        kind=AgentRuntimeKind.CLI_AGENT,
+        display_name="Codex CLI",
+        executables=("codex", "codex-rs", "codex-cli"),
+    ),
+    _RuntimePattern(
+        source=AgentRuntimeSource.CODEX,
+        kind=AgentRuntimeKind.CLI_AGENT,
+        display_name="Codex CLI",
+        executables=("node", "bun"),
+        arg_needles=("@openai/codex", "codex/cli.js", "openai-codex"),
+        require_all=True,
+    ),
+    # OpenCode: SST's terminal coding agent.
+    _RuntimePattern(
+        source=AgentRuntimeSource.OPENCODE,
+        kind=AgentRuntimeKind.CLI_AGENT,
+        display_name="OpenCode CLI",
+        executables=("opencode",),
+    ),
+    _RuntimePattern(
+        source=AgentRuntimeSource.OPENCODE,
+        kind=AgentRuntimeKind.CLI_AGENT,
+        display_name="OpenCode CLI",
+        executables=("node", "bun"),
+        arg_needles=("@sst/opencode", "opencode/dist", "opencode/cli"),
+        require_all=True,
+    ),
+    # Aider — Python-based, frequently launched as ``aider`` or via
+    # ``python -m aider``. The interpreter rule keeps us honest when
+    # the user uses pipx/poetry-managed envs.
+    _RuntimePattern(
+        source=AgentRuntimeSource.AIDER,
+        kind=AgentRuntimeKind.CLI_AGENT,
+        display_name="Aider",
+        executables=("aider",),
+    ),
+    _RuntimePattern(
+        source=AgentRuntimeSource.AIDER,
+        kind=AgentRuntimeKind.CLI_AGENT,
+        display_name="Aider",
+        executables=("python", "python3", "python3.11", "python3.12"),
+        arg_needles=("-m aider", "/aider/main.py", "/aider-chat/"),
+        require_all=True,
+    ),
+    # Gemini CLI (Google).
+    _RuntimePattern(
+        source=AgentRuntimeSource.GEMINI,
+        kind=AgentRuntimeKind.CLI_AGENT,
+        display_name="Gemini CLI",
+        executables=("gemini",),
+        # ``gemini`` alone is too ambiguous (could be unrelated
+        # ``gemini-protocol`` browser); require an arg hint.
+        arg_needles=("--model", "--prompt", "google-gemini", "ai-cli"),
+        require_all=True,
+    ),
+    _RuntimePattern(
+        source=AgentRuntimeSource.GEMINI,
+        kind=AgentRuntimeKind.CLI_AGENT,
+        display_name="Gemini CLI",
+        executables=("node", "bun"),
+        arg_needles=("@google/gemini-cli", "gemini-cli/dist"),
+        require_all=True,
+    ),
+    # Moonshot Kimi CLI.
+    _RuntimePattern(
+        source=AgentRuntimeSource.KIMI,
+        kind=AgentRuntimeKind.CLI_AGENT,
+        display_name="Kimi CLI",
+        executables=("kimi", "kimi-cli"),
+    ),
+    # Qwen Code (Alibaba).
+    _RuntimePattern(
+        source=AgentRuntimeSource.QWEN,
+        kind=AgentRuntimeKind.CLI_AGENT,
+        display_name="Qwen Code CLI",
+        executables=("qwen", "qwen-code"),
+    ),
+    # Factory.ai Droid CLI — its launcher is ``droid``.
+    _RuntimePattern(
+        source=AgentRuntimeSource.FACTORY_DROID,
+        kind=AgentRuntimeKind.CLI_AGENT,
+        display_name="Factory Droid",
+        executables=("droid", "factory-droid"),
+    ),
+    _RuntimePattern(
+        source=AgentRuntimeSource.FACTORY_DROID,
+        kind=AgentRuntimeKind.CLI_AGENT,
+        display_name="Factory Droid",
+        executables=("factory",),
+        # Plain ``factory`` is ambiguous, require an args hint.
+        arg_needles=("droid", "factory.ai", "@factoryai/", "factory-cli"),
+        require_all=True,
+    ),
+    # Tencent CodeBuddy.
+    _RuntimePattern(
+        source=AgentRuntimeSource.CODEBUDDY,
+        kind=AgentRuntimeKind.CLI_AGENT,
+        display_name="CodeBuddy CLI",
+        executables=("codebuddy", "codebuddy-cli"),
+    ),
+    # Qoder CLI.
+    _RuntimePattern(
+        source=AgentRuntimeSource.QODER,
+        kind=AgentRuntimeKind.CLI_AGENT,
+        display_name="Qoder CLI",
+        executables=("qoder", "qoder-cli"),
+    ),
+    # --- GUI IDEs -----------------------------------------------------------
+    _RuntimePattern(
+        source=AgentRuntimeSource.CURSOR,
+        kind=AgentRuntimeKind.GUI_IDE,
+        display_name="Cursor",
+        executables=("cursor",),
+        arg_needles=("cursor.app",),
+        avoid_needles=("cursor helper",),
+        bundle_id="com.todesktop.230313mzl4w4u92",
+        helper_needles=("cursor helper", "(renderer)", "(gpu)", "crashpad_handler"),
+    ),
+    _RuntimePattern(
+        source=AgentRuntimeSource.WINDSURF,
+        kind=AgentRuntimeKind.GUI_IDE,
+        display_name="Windsurf",
+        executables=("windsurf",),
+        arg_needles=("windsurf.app",),
+        avoid_needles=("windsurf helper",),
+        bundle_id="com.exafunction.windsurf",
+        helper_needles=("windsurf helper", "(renderer)", "(gpu)", "crashpad_handler"),
+    ),
+    _RuntimePattern(
+        source=AgentRuntimeSource.VSCODE,
+        kind=AgentRuntimeKind.GUI_IDE,
+        display_name="VSCode",
+        executables=("code",),
+        arg_needles=("visual studio code.app", "vscode"),
+        avoid_needles=("code helper", "code - insiders helper"),
+        bundle_id="com.microsoft.VSCode",
+        helper_needles=("code helper", "(renderer)", "(gpu)", "crashpad_handler"),
+    ),
+    _RuntimePattern(
+        # The Electron launcher binary inside VSCode.app is named
+        # ``Electron``. ``electron`` alone is way too generic
+        # (Discord, Slack, Notion all ship Electron) so we only
+        # match when the args confirm we're inside VSCode's app
+        # bundle. Helper subprocesses get filtered out via
+        # ``helper_needles``.
+        source=AgentRuntimeSource.VSCODE,
+        kind=AgentRuntimeKind.GUI_IDE,
+        display_name="VSCode",
+        executables=("electron",),
+        arg_needles=("visual studio code.app", "/code helper"),
+        avoid_needles=("code helper", "code - insiders helper"),
+        bundle_id="com.microsoft.VSCode",
+        helper_needles=("code helper", "(renderer)", "(gpu)", "crashpad_handler"),
+        require_all=True,
+    ),
+    _RuntimePattern(
+        source=AgentRuntimeSource.XCODE,
+        kind=AgentRuntimeKind.GUI_IDE,
+        display_name="Xcode",
+        executables=("xcode",),
+        arg_needles=("xcode.app/contents/macos/xcode",),
+        bundle_id="com.apple.dt.Xcode",
+    ),
+    _RuntimePattern(
+        source=AgentRuntimeSource.JETBRAINS,
+        kind=AgentRuntimeKind.GUI_IDE,
+        display_name="JetBrains IDE",
+        # JetBrains ships every IDE as a separate launcher binary.
+        # ``studio`` / ``android studio`` are ambiguous — they
+        # appear in the disambiguation table below requiring an
+        # args hint.
+        executables=(
+            "idea",
+            "intellij",
+            "pycharm",
+            "webstorm",
+            "goland",
+            "rubymine",
+            "clion",
+            "rustrover",
+            "phpstorm",
+            "datagrip",
+            "androidstudio",
+        ),
+        arg_needles=("jetbrains", "intellij", "pycharm", "webstorm", "goland", "rubymine"),
+        bundle_id=None,
+    ),
+    _RuntimePattern(
+        # ``studio`` alone matches Android Studio's launcher but
+        # is also a very generic word. Require args to confirm
+        # we're inside an Android Studio bundle.
+        source=AgentRuntimeSource.JETBRAINS,
+        kind=AgentRuntimeKind.GUI_IDE,
+        display_name="Android Studio",
+        executables=("studio", "android studio"),
+        arg_needles=("android studio.app", "android-studio"),
+        bundle_id=None,
+        require_all=True,
+    ),
+    _RuntimePattern(
+        source=AgentRuntimeSource.FLEET,
+        kind=AgentRuntimeKind.GUI_IDE,
+        display_name="Fleet",
+        executables=("fleet",),
+        arg_needles=("jetbrains/fleet", "fleet.app"),
+        bundle_id="com.jetbrains.fleet",
+    ),
+    _RuntimePattern(
+        source=AgentRuntimeSource.ZED,
+        kind=AgentRuntimeKind.GUI_IDE,
+        display_name="Zed",
+        executables=("zed", "zed-editor"),
+        arg_needles=("zed.app",),
+        bundle_id="dev.zed.Zed",
+    ),
+    _RuntimePattern(
+        source=AgentRuntimeSource.TRAE,
+        kind=AgentRuntimeKind.GUI_IDE,
+        display_name="Trae",
+        executables=("trae",),
+        arg_needles=("trae.app",),
+        bundle_id="com.bytedance.trae",
+        helper_needles=("trae helper", "(renderer)", "(gpu)"),
+    ),
+    _RuntimePattern(
+        source=AgentRuntimeSource.SUBLIME,
+        kind=AgentRuntimeKind.GUI_IDE,
+        display_name="Sublime Text",
+        executables=("sublime_text", "subl"),
+        arg_needles=("sublime text.app",),
+        bundle_id="com.sublimetext.4",
+    ),
+    _RuntimePattern(
+        source=AgentRuntimeSource.NOVA,
+        kind=AgentRuntimeKind.GUI_IDE,
+        display_name="Nova",
+        executables=("nova",),
+        arg_needles=("nova.app",),
+        bundle_id="com.panic.Nova",
+    ),
+    _RuntimePattern(
+        source=AgentRuntimeSource.NEOVIM,
+        kind=AgentRuntimeKind.GUI_IDE,
+        display_name="Neovim",
+        executables=("nvim", "neovide", "vimr"),
+    ),
+    _RuntimePattern(
+        source=AgentRuntimeSource.GITHUB_DESKTOP,
+        kind=AgentRuntimeKind.GUI_IDE,
+        display_name="GitHub Desktop",
+        executables=("github desktop",),
+        arg_needles=("github desktop.app",),
+        bundle_id="com.github.GitHubClient",
+        helper_needles=("github desktop helper", "(renderer)", "(gpu)"),
+    ),
+    # --- Terminals ----------------------------------------------------------
+    _RuntimePattern(
+        source=AgentRuntimeSource.WARP,
+        kind=AgentRuntimeKind.GUI_IDE,
+        display_name="Warp",
+        executables=("warp",),
+        arg_needles=("warp.app",),
+        bundle_id="dev.warp.Warp-Stable",
+    ),
+    _RuntimePattern(
+        # Warp's actual binary inside Warp.app is named ``stable``.
+        # Plain ``stable`` is wildly generic, so we require both
+        # the exec and the args to match.
+        source=AgentRuntimeSource.WARP,
+        kind=AgentRuntimeKind.GUI_IDE,
+        display_name="Warp",
+        executables=("stable",),
+        arg_needles=("warp.app",),
+        bundle_id="dev.warp.Warp-Stable",
+        require_all=True,
+    ),
+)
+
+
+# Default rank for ordering session rows. Phase first, priority
+# second; CLI agents outrank GUI IDEs at the same phase since
+# they are typically the foreground actor.
+_PHASE_RANK: dict[SessionPhase, int] = {
+    SessionPhase.WAITING_FOR_APPROVAL: 0,
+    SessionPhase.WAITING_FOR_ANSWER: 1,
+    SessionPhase.FAILED: 2,
+    SessionPhase.RUNNING_TOOL: 3,
+    SessionPhase.EDITING: 4,
+    SessionPhase.TESTING: 5,
+    SessionPhase.THINKING: 6,
+    SessionPhase.RUNNING: 7,
+    SessionPhase.COMPLETED: 8,
+}
+
+_PRIORITY_RANK: dict[Priority, int] = {
+    Priority.P0: 0,
+    Priority.P1: 1,
+    Priority.P2: 2,
+    Priority.P3: 3,
+}
+
+
+# Regex used to pull a workspace path out of VSCode-family args.
+# Matches both ``--folder-uri file:///foo/bar`` and
+# ``--folder-uri=file:///foo/bar`` plus a bare positional path.
+_FOLDER_URI_RE = re.compile(
+    r"--folder-uri[=\s]+(file://[^\s]+)",
+    re.IGNORECASE,
+)
+_FILE_URI_RE = re.compile(r"\bfile://([^\s]+)")
+
+
+# ---------------------------------------------------------------------------
+# Store
+# ---------------------------------------------------------------------------
 
 
 class AgentRuntimeStore:
@@ -139,6 +592,11 @@ def _default_ps_provider() -> str:
         text=True,
         stderr=subprocess.DEVNULL,
     )
+
+
+# ---------------------------------------------------------------------------
+# Scanner
+# ---------------------------------------------------------------------------
 
 
 class AgentRuntimeScanner:
@@ -230,6 +688,11 @@ class AgentRuntimeScanner:
             self._sessions.remove(sid)
 
 
+# ---------------------------------------------------------------------------
+# Parsing
+# ---------------------------------------------------------------------------
+
+
 def parse_ps_output(text: str) -> list[ProcessRow]:
     rows: list[ProcessRow] = []
     for raw in text.splitlines():
@@ -251,94 +714,175 @@ def parse_ps_output(text: str) -> list[ProcessRow]:
 
 
 def discover_runtime_statuses(
-    rows: list[ProcessRow], *, now_ms: int
+    rows: Sequence[ProcessRow], *, now_ms: int
 ) -> list[AgentRuntimeStatus]:
-    out: list[AgentRuntimeStatus] = []
+    """Classify ``rows`` and return one status per logical runtime.
+
+    The same IDE often shows up as 4-8 helper processes (Cursor /
+    VSCode renderers, GPU subprocesses, crashpad handlers). We
+    dedupe by ``(source, top-level pid)``: the first match wins
+    and helper-shaped descendants get folded under it. CLI agents
+    are deduped by ``(source, pid)`` directly because they don't
+    fork renderers.
+    """
+
+    classified: list[tuple[ProcessRow, _RuntimePattern, AgentRuntimeStatus]] = []
     for row in rows:
-        status = _status_from_process(row, now_ms=now_ms)
-        if status is not None:
-            out.append(status)
+        match = _classify(row)
+        if match is None:
+            continue
+        pattern = match
+        status = _build_status(row, pattern, now_ms=now_ms)
+        classified.append((row, pattern, status))
+
+    return _dedupe_renderers(classified)
+
+
+def _classify(row: ProcessRow) -> _RuntimePattern | None:
+    """Return the first ``_RuntimePattern`` that matches ``row``,
+    or ``None`` if nothing matches. See ``_RuntimePattern`` for the
+    matching semantics; this function is the actual implementation.
+    """
+
+    executable = Path(row.comm).name.lower()
+    args_lower = row.args.lower()
+
+    for pattern in _RUNTIME_PATTERNS:
+        # Helper subprocesses are never the primary match — let
+        # the parent application win and dedupe will collapse the
+        # rest.
+        if pattern.helper_needles and any(
+            needle.lower() in args_lower for needle in pattern.helper_needles
+        ):
+            continue
+        # avoid_needles is a hard reject, regardless of require_all.
+        if pattern.avoid_needles and any(
+            needle.lower() in args_lower for needle in pattern.avoid_needles
+        ):
+            continue
+
+        exec_hit = bool(pattern.executables) and executable in pattern.executables
+        args_hit = bool(pattern.arg_needles) and any(
+            needle.lower() in args_lower for needle in pattern.arg_needles
+        )
+
+        if pattern.require_all:
+            # Interpreter rules: need both halves to agree.
+            if exec_hit and args_hit:
+                return pattern
+            continue
+
+        # Default: either signal is sufficient. A pattern with both
+        # fields set accepts a process that matches either of them,
+        # which is what lets the dedicated ``cursor`` binary OR the
+        # ``Cursor.app`` args path both classify as Cursor.
+        if exec_hit or args_hit:
+            return pattern
+    return None
+
+
+def _build_status(
+    row: ProcessRow, pattern: _RuntimePattern, *, now_ms: int
+) -> AgentRuntimeStatus:
+    cwd_hint = (
+        _extract_workspace_hint(row.args)
+        if pattern.kind is AgentRuntimeKind.GUI_IDE
+        else None
+    )
+    return AgentRuntimeStatus(
+        source=pattern.source,
+        kind=pattern.kind,
+        process_id=row.pid,
+        parent_pid=row.ppid,
+        display_name=pattern.display_name,
+        command=row.args,
+        bundle_id=pattern.bundle_id,
+        cwd=cwd_hint,
+        phase=SessionPhase.RUNNING,
+        priority=_priority_for(pattern.kind),
+        last_seen_ms=now_ms,
+        raw={"comm": row.comm},
+    )
+
+
+def _priority_for(kind: AgentRuntimeKind) -> Priority:
+    # CLI agents are the active driver, GUI IDEs are background
+    # context. Mirrors the pre-rewrite values so existing tests
+    # locking the priority continue to pass.
+    if kind is AgentRuntimeKind.CLI_AGENT:
+        return Priority.P1
+    return Priority.P3
+
+
+def _dedupe_renderers(
+    classified: Iterable[tuple[ProcessRow, _RuntimePattern, AgentRuntimeStatus]],
+) -> list[AgentRuntimeStatus]:
+    """Collapse Electron renderer / helper subprocess swarms.
+
+    Algorithm:
+
+    1. Group classified rows by ``(source, root_pid)`` where
+       ``root_pid`` is the topmost ancestor pid we've seen in the
+       same group. Helper / renderer rows that managed to slip
+       past the helper_needles filter are now folded into the
+       earliest-pid group with the same source.
+    2. The lowest-pid row in each group survives. We pick the
+       lowest pid because Electron's main process is forked
+       before its helpers, so it carries the smaller pid.
+
+    This keeps GUI IDEs at one row per app while still letting
+    multiple distinct CLI invocations of the same agent each
+    produce their own row (their parent pids diverge).
+    """
+
+    by_group: dict[tuple[AgentRuntimeSource, int], list[
+        tuple[ProcessRow, _RuntimePattern, AgentRuntimeStatus]
+    ]] = {}
+    for row, pattern, status in classified:
+        if pattern.kind is AgentRuntimeKind.GUI_IDE:
+            # GUI IDEs collapse onto the source — all renderers
+            # must merge into one row regardless of their pid.
+            key = (pattern.source, 0)
+        else:
+            # CLI agents keep one row per (source, pid). Two
+            # ``codex`` instances in two terminals are two
+            # distinct sessions.
+            key = (pattern.source, row.pid)
+        by_group.setdefault(key, []).append((row, pattern, status))
+
+    out: list[AgentRuntimeStatus] = []
+    for group in by_group.values():
+        # Lowest pid wins so we keep the Electron main process
+        # rather than a helper that briefly sat closer to the
+        # top of the table.
+        group.sort(key=lambda entry: entry[0].pid)
+        out.append(group[0][2])
     return out
 
 
-def _status_from_process(row: ProcessRow, *, now_ms: int) -> AgentRuntimeStatus | None:
-    executable = Path(row.comm).name.lower()
-    args = row.args.lower()
+def _extract_workspace_hint(args: str) -> str | None:
+    """Best-effort workspace path extraction from VSCode-family args.
 
-    cli = _classify_cli(executable, args)
-    if cli is not None:
-        source, display = cli
-        return AgentRuntimeStatus(
-            source=source,
-            kind=AgentRuntimeKind.CLI_AGENT,
-            process_id=row.pid,
-            parent_pid=row.ppid,
-            display_name=display,
-            command=row.args,
-            phase=SessionPhase.RUNNING,
-            priority=Priority.P1,
-            last_seen_ms=now_ms,
-            raw={"comm": row.comm},
-        )
+    Looks for either:
 
-    gui = _classify_gui(executable, args)
-    if gui is not None:
-        source, display, bundle_id = gui
-        return AgentRuntimeStatus(
-            source=source,
-            kind=AgentRuntimeKind.GUI_IDE,
-            process_id=row.pid,
-            parent_pid=row.ppid,
-            display_name=display,
-            command=row.args,
-            bundle_id=bundle_id,
-            phase=SessionPhase.RUNNING,
-            priority=Priority.P3,
-            last_seen_ms=now_ms,
-            raw={"comm": row.comm},
-        )
-    return None
+    * ``--folder-uri file:///abs/path`` (Code, Cursor, Windsurf
+      all emit this when launched from the dock with a
+      remembered workspace).
+    * Any bare ``file://`` URI in the args.
 
+    Returns ``None`` when nothing recognisable is present —
+    callers should treat this as best-effort and not assume
+    every GUI row will have a cwd. URL-decoding handles the
+    common case of spaces in folder names being percent-escaped.
+    """
 
-def _classify_cli(
-    executable: str, args: str
-) -> tuple[AgentRuntimeSource, str] | None:
-    if executable in {"claude", "claude-code"} or "claude-code" in args:
-        return AgentRuntimeSource.CLAUDE_CODE, "Claude Code CLI"
-    if executable == "codex" or " openai/codex" in args:
-        return AgentRuntimeSource.CODEX, "Codex CLI"
-    if executable == "opencode" or "opencode" in args:
-        return AgentRuntimeSource.OPENCODE, "OpenCode CLI"
-    return None
-
-
-def _classify_gui(
-    executable: str, args: str
-) -> tuple[AgentRuntimeSource, str, str | None] | None:
-    haystack = f"{executable} {args}"
-    if "cursor.app" in haystack or executable in {"cursor"}:
-        return AgentRuntimeSource.CURSOR, "Cursor", "com.todesktop.230313mzl4w4u92"
-    if "windsurf.app" in haystack or "windsurf" in haystack:
-        return AgentRuntimeSource.WINDSURF, "Windsurf", "com.exafunction.windsurf"
-    if "visual studio code.app" in haystack or (
-        executable in {"code", "electron"} and "vscode" in haystack
-    ):
-        return AgentRuntimeSource.VSCODE, "VSCode", "com.microsoft.VSCode"
-    if "xcode.app" in haystack or executable == "xcode":
-        return AgentRuntimeSource.XCODE, "Xcode", "com.apple.dt.Xcode"
-    if "jetbrains" in haystack or any(
-        name in haystack
-        for name in (
-            "intellij",
-            "pycharm",
-            "webstorm",
-            "goland",
-            "rubymine",
-            "clion",
-        )
-    ):
-        return AgentRuntimeSource.JETBRAINS, "JetBrains IDE", None
-    return None
+    match = _FOLDER_URI_RE.search(args) or _FILE_URI_RE.search(args)
+    if match is None:
+        return None
+    raw = match.group(1) if match.lastindex == 1 else match.group(0)
+    parsed = urlparse(raw if raw.startswith("file://") else f"file://{raw}")
+    path = unquote(parsed.path)
+    return path or None
 
 
 def _summary_for(status: AgentRuntimeStatus) -> str:
@@ -355,26 +899,11 @@ def _is_hook_session(session: SessionInfo) -> bool:
 
 
 def _phase_rank(phase: SessionPhase) -> int:
-    return {
-        SessionPhase.WAITING_FOR_APPROVAL: 0,
-        SessionPhase.WAITING_FOR_ANSWER: 1,
-        SessionPhase.FAILED: 2,
-        SessionPhase.RUNNING_TOOL: 3,
-        SessionPhase.EDITING: 4,
-        SessionPhase.TESTING: 5,
-        SessionPhase.THINKING: 6,
-        SessionPhase.RUNNING: 7,
-        SessionPhase.COMPLETED: 8,
-    }.get(phase, 9)
+    return _PHASE_RANK.get(phase, 9)
 
 
 def _priority_rank(priority: Priority) -> int:
-    return {
-        Priority.P0: 0,
-        Priority.P1: 1,
-        Priority.P2: 2,
-        Priority.P3: 3,
-    }.get(priority, 9)
+    return _PRIORITY_RANK.get(priority, 9)
 
 
 __all__ = [

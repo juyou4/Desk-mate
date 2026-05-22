@@ -1555,6 +1555,49 @@ runner.test("session-row: decodes runtime source fields") {
     try runner.expect(row.canAttemptJump, "runtime rows should allow jump attempts")
 }
 
+// V10 polish: extended runtime lineup. Keep the label switch in
+// ``SessionRow.sourceLabel`` aligned with
+// ``deskmate_agent.agent_runtime.AgentRuntimeSource`` — Python emits
+// the snake_case values, Swift maps them to display labels for the
+// island session list.
+runner.test("session-row: pretty labels for extended runtime sources") {
+    let pairs: [(String, String)] = [
+        ("aider", "Aider"),
+        ("gemini", "Gemini"),
+        ("kimi", "Kimi"),
+        ("qwen", "Qwen"),
+        ("factory_droid", "Factory Droid"),
+        ("codebuddy", "CodeBuddy"),
+        ("qoder", "Qoder"),
+        ("zed", "Zed"),
+        ("trae", "Trae"),
+        ("sublime", "Sublime"),
+        ("fleet", "Fleet"),
+        ("nova", "Nova"),
+        ("neovim", "Neovim"),
+        ("github_desktop", "GitHub Desktop"),
+        ("warp", "Warp"),
+    ]
+    for (raw, expected) in pairs {
+        let row = SessionRow(sessionId: "s-\(raw)", source: raw)
+        try runner.expect(
+            row.sourceLabel == expected,
+            "label for \(raw) wrong: got \(row.sourceLabel ?? "nil")"
+        )
+    }
+}
+
+// V10 polish: an unknown source falls through to the default
+// PrettyPrint branch — we lock the contract so adding a Python
+// source with no Swift case still produces a usable label.
+runner.test("session-row: unknown source falls back to PrettyPrint") {
+    let row = SessionRow(sessionId: "s1", source: "future_agent_v3")
+    try runner.expect(
+        row.sourceLabel == "Future Agent V3",
+        "fallback label wrong: got \(row.sourceLabel ?? "nil")"
+    )
+}
+
 runner.test("session-row: decodes fine-grained agent phases") {
     let raw = #"""
     {"session_id":"s1","phase":"editing"}

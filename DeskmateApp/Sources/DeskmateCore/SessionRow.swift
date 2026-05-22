@@ -178,6 +178,29 @@ public struct SessionRow: Equatable, Sendable, Codable {
         case "xcode": return "Xcode"
         case "jetbrains": return "JetBrains"
         case "opencode": return "OpenCode"
+        // V10 polish: extended runtime lineup. Keep these in
+        // sync with ``AgentRuntimeSource`` in
+        // ``agent/deskmate_agent/agent_runtime.py``. The default
+        // branch already PrettyPrints unknown sources, so adding
+        // a new Python source without a matching case here
+        // produces a reasonable label automatically; we add the
+        // explicit cases when the auto-derived form is awkward
+        // (e.g. ``Github Desktop`` vs ``GitHub Desktop``).
+        case "aider": return "Aider"
+        case "gemini": return "Gemini"
+        case "kimi": return "Kimi"
+        case "qwen": return "Qwen"
+        case "factory_droid": return "Factory Droid"
+        case "codebuddy": return "CodeBuddy"
+        case "qoder": return "Qoder"
+        case "zed": return "Zed"
+        case "trae": return "Trae"
+        case "sublime": return "Sublime"
+        case "fleet": return "Fleet"
+        case "nova": return "Nova"
+        case "neovim": return "Neovim"
+        case "github_desktop": return "GitHub Desktop"
+        case "warp": return "Warp"
         case "terminal": return "Terminal"
         default:
             return raw

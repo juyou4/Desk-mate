@@ -24,14 +24,32 @@ final class IslandWindowController {
     private let runtime: DeskmateMenuBarRuntime
     private var window: NSPanel?
     private var policyCancellable: AnyCancellable?
+    private var customizationUnsub: (() -> Void)?
     private var islandCancellable: AnyCancellable?
     private var sessionsCancellable: AnyCancellable?
     private var approvalsCancellable: AnyCancellable?
     private var localMouseMonitor: Any?
     private var globalMouseMonitor: Any?
+    /// V10 island polish: observer for
+    /// ``NSApplication.didChangeScreenParametersNotification``. Fires
+    /// when the user hot-plugs an external display, toggles
+    /// resolution, or returns from a clamshell — we re-pick the
+    /// preferred notched screen and reposition the panel so the
+    /// island never ends up offscreen.
+    private var screenParametersObserver: NSObjectProtocol?
     private var hoverOpenWorkItem: DispatchWorkItem?
     private var hoverCloseWorkItem: DispatchWorkItem?
+    /// V10 island polish: 100ms grace period after the cursor leaves
+    /// the hover-activation rect during which we *don't* cancel the
+    /// pending ``hoverOpenWorkItem``. Avoids restarting the 200ms
+    /// open timer every time the mouse jitters across the notch
+    /// edge — open-vibe-island's `OverlayPanelController` does the
+    /// same thing.
+    private var hoverOpenCancelGrace: DispatchWorkItem?
     private var lastMouseMoveAt: CFTimeInterval = 0
+    private static let hoverOpenDelay: TimeInterval = 0.20
+    private static let hoverCloseDelay: TimeInterval = 0.14
+    private static let hoverOpenCancelGrace: TimeInterval = 0.10
 
     init(runtime: DeskmateMenuBarRuntime) {
         self.runtime = runtime
@@ -74,6 +92,12 @@ final class IslandWindowController {
         w.isOpaque = false
         w.backgroundColor = .clear
         w.hasShadow = false
+        // V10 island polish: hide the panel from screen-capture /
+        // ScreenCaptureKit so users sharing their screen on Zoom /
+        // OBS don't see the island float over their content. macOS
+        // honours this for borderless panels at ``.statusBar``
+        // level.
+        w.sharingType = .none
         // ``.statusBar`` sits above menu bar items so the pill remains
         // visible when the user pulls down the menu bar; this is the
         // same level macOS uses for system dialogs like the volume
@@ -102,16 +126,30 @@ final class IslandWindowController {
         self.window = w
         installResizeSubscriptions()
         installMouseMonitors()
+        installScreenParametersObserver()
         publishDiagnostics()
     }
 
     func close() {
         removeMouseMonitors()
+        removeScreenParametersObserver()
         window?.orderOut(nil)
         window = nil
         islandCancellable = nil
         sessionsCancellable = nil
         approvalsCancellable = nil
+        // V10 I7: drop the customization subscription so we don't
+        // leak a closure into ``TopSurfaceCustomizationStore`` after
+        // the controller has gone away (e.g. the user dropped to
+        // degradation level 5 and the panel was orderedOut).
+        customizationUnsub?()
+        customizationUnsub = nil
+        // Drop the policy subscription as well so a fresh
+        // ``install()`` rebuilds the chain instead of stacking
+        // multiple sinks. ``installPolicySubscriptionIfNeeded`` is
+        // idempotent on its own, but keeping the lifecycle
+        // symmetric avoids surprises if the controller is reused.
+        policyCancellable = nil
     }
 
     // MARK: - Degradation policy subscription
@@ -123,6 +161,22 @@ final class IslandWindowController {
             .sink { [weak self] policy in
                 self?.applyDegradation(policy)
             }
+        // V10 I7: a hardwareNotchMode flip rebuilds the panel
+        // frame so the user immediately sees the floating-bar /
+        // notch transition without restarting the app.
+        if customizationUnsub == nil {
+            customizationUnsub = runtime.topSurfaceCustomization.subscribe { [weak self] _ in
+                Task { @MainActor in self?.relayoutForCustomization() }
+            }
+        }
+    }
+
+    private func relayoutForCustomization() {
+        guard window != nil else { return }
+        // Use ``forceExpanded == nil`` so the controller reads the
+        // runtime's current expanded state — same path the
+        // session/approval subscriptions use.
+        resizeForCurrentState()
     }
 
     private func installResizeSubscriptions() {
@@ -195,7 +249,20 @@ final class IslandWindowController {
     }
 
     private func targetScreen() -> NSScreen? {
-        NSScreen.screens.first(where: { $0.deskmateHasPhysicalNotch })
+        // V10 I7 hardwareNotchMode:
+        // - .automatic — prefer the built-in notched display, fall
+        //   back to ``NSScreen.main`` (current default).
+        // - .forceNotched — same as automatic; skipping the option
+        //   merely keeps the auto path explicit when the user has
+        //   pinned the choice.
+        // - .forceFlat — pretend no notch is present; pick
+        //   ``NSScreen.main`` so the island renders as a floating
+        //   bar even on a MacBook with a real notch.
+        let mode = runtime.topSurfaceCustomization.current.hardwareNotchMode
+        if mode == .forceFlat {
+            return NSScreen.main ?? NSScreen.screens.first
+        }
+        return NSScreen.screens.first(where: { $0.deskmateHasPhysicalNotch })
             ?? NSScreen.main
             ?? NSScreen.screens.first
     }
@@ -208,10 +275,22 @@ final class IslandWindowController {
         for screen: NSScreen,
         forceExpanded: Bool? = nil
     ) -> IslandInteractionGeometry {
-        IslandInteractionGeometry(input: IslandInteractionInput(
+        let mode = runtime.topSurfaceCustomization.current.hardwareNotchMode
+        let notchSize: CGSize
+        let hasNotch: Bool
+        if mode == .forceFlat {
+            // Pretend the screen is flat — render a floating bar
+            // of fixed size centred at the top.
+            notchSize = CGSize(width: 224, height: 28)
+            hasNotch = false
+        } else {
+            notchSize = screen.deskmateNotchSize
+            hasNotch = screen.deskmateHasPhysicalNotch
+        }
+        return IslandInteractionGeometry(input: IslandInteractionInput(
             screenFrame: screen.frame,
-            notchSize: screen.deskmateNotchSize,
-            hasPhysicalNotch: screen.deskmateHasPhysicalNotch,
+            notchSize: notchSize,
+            hasPhysicalNotch: hasNotch,
             hasCompactPresence: hasCompactPresence(runtime) || forceExpanded == false,
             isExpanded: forceExpanded ?? runtime.isIslandExpanded,
             activeCount: max(runtime.sessions.count, runtime.approvals.count)
@@ -271,6 +350,48 @@ final class IslandWindowController {
         runtime.updateIslandDiagnostics(geometry(for: screen).diagnostics(screenName: name))
     }
 
+    // MARK: - Screen parameters
+
+    /// Re-pick the target screen and re-layout the panel. Called by
+    /// the screen-parameters notification listener and exposed for
+    /// tests so they can drive the re-layout without spinning a
+    /// real ``NSApplication`` notification.
+    func noteScreenParametersChanged() {
+        guard window != nil else { return }
+        // Defer one runloop turn so that ``NSScreen.screens`` has
+        // settled — macOS posts the notification *during* the
+        // hardware switch and the array can momentarily contain a
+        // stale display.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.window != nil else { return }
+            self.repositionForCurrentScreen()
+        }
+    }
+
+    private func installScreenParametersObserver() {
+        guard screenParametersObserver == nil else { return }
+        screenParametersObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.noteScreenParametersChanged() }
+        }
+    }
+
+    private func removeScreenParametersObserver() {
+        if let screenParametersObserver {
+            NotificationCenter.default.removeObserver(screenParametersObserver)
+        }
+        screenParametersObserver = nil
+    }
+
+    private func repositionForCurrentScreen() {
+        guard let w = window else { return }
+        positionAtTopCenter(window: w)
+        resizeForCurrentState()
+    }
+
     // MARK: - Mouse monitors
 
     private func installMouseMonitors() {
@@ -291,8 +412,10 @@ final class IslandWindowController {
     private func removeMouseMonitors() {
         hoverOpenWorkItem?.cancel()
         hoverCloseWorkItem?.cancel()
+        hoverOpenCancelGrace?.cancel()
         hoverOpenWorkItem = nil
         hoverCloseWorkItem = nil
+        hoverOpenCancelGrace = nil
         if let localMouseMonitor {
             NSEvent.removeMonitor(localMouseMonitor)
         }
@@ -319,16 +442,24 @@ final class IslandWindowController {
         guard let localPoint = panelLocalPoint(for: screenPoint, margin: 32),
               let geometry = geometryForCurrentWindow()
         else {
-            hoverOpenWorkItem?.cancel()
+            // Pointer left the panel altogether. Start the cancel
+            // grace so a brief excursion doesn't kill an in-flight
+            // open timer; if the cursor doesn't return within the
+            // grace period we'll commit to closing.
+            scheduleHoverOpenCancelGrace()
             scheduleHoverClose()
             return
         }
         let inside = geometry.hoverActivationRectInPanel.contains(localPoint)
         if inside {
+            // Cancel any pending close + cancel-grace on re-entry.
             hoverCloseWorkItem?.cancel()
+            hoverCloseWorkItem = nil
+            hoverOpenCancelGrace?.cancel()
+            hoverOpenCancelGrace = nil
             scheduleHoverOpen()
         } else {
-            hoverOpenWorkItem?.cancel()
+            scheduleHoverOpenCancelGrace()
             scheduleHoverClose()
         }
     }
@@ -346,23 +477,52 @@ final class IslandWindowController {
 
     private func scheduleHoverOpen() {
         guard !runtime.isIslandExpanded else { return }
-        hoverOpenWorkItem?.cancel()
+        // Idempotent: an in-flight timer is reused so the user
+        // doesn't pay an extra 200 ms whenever the mouse twitches
+        // back into the activation rect during the same open burst.
+        guard hoverOpenWorkItem == nil else { return }
         let item = DispatchWorkItem { [weak self] in
+            self?.hoverOpenWorkItem = nil
             self?.applyPanelFrame(forceExpanded: true)
             self?.runtime.openIslandSessionList()
         }
         hoverOpenWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.20, execute: item)
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.hoverOpenDelay, execute: item
+        )
+    }
+
+    /// Schedule the cancel-grace work item that, after its delay,
+    /// kills any in-flight ``hoverOpenWorkItem``. Re-entering the
+    /// hover region while the grace is pending revokes it without
+    /// touching the open timer, so brief mouse jitter at the notch
+    /// edge no longer restarts the 200 ms wait.
+    private func scheduleHoverOpenCancelGrace() {
+        guard hoverOpenWorkItem != nil else { return }
+        guard hoverOpenCancelGrace == nil else { return }
+        let grace = DispatchWorkItem { [weak self] in
+            self?.hoverOpenWorkItem?.cancel()
+            self?.hoverOpenWorkItem = nil
+            self?.hoverOpenCancelGrace = nil
+        }
+        hoverOpenCancelGrace = grace
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.hoverOpenCancelGrace,
+            execute: grace
+        )
     }
 
     private func scheduleHoverClose() {
         guard runtime.isIslandExpanded else { return }
         hoverCloseWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
+            self?.hoverCloseWorkItem = nil
             self?.runtime.closeIslandSessionList(source: .island)
         }
         hoverCloseWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.14, execute: item)
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.hoverCloseDelay, execute: item
+        )
     }
 
     private func panelLocalPoint(for screenPoint: NSPoint, margin: CGFloat) -> NSPoint? {
@@ -426,12 +586,29 @@ private final class IslandHostingView<Content: View>: NSHostingView<Content> {
         for runtime: DeskmateMenuBarRuntime,
         in bounds: NSRect
     ) -> NSRect {
-        let screen = NSScreen.screens.first(where: { $0.deskmateHasPhysicalNotch })
-            ?? NSScreen.main
+        // V10 I7: respect the runtime's hardware-notch override so
+        // hit-testing tracks the geometry path. If the user pinned
+        // ``.forceFlat`` we synthesize a 224×28 floating-bar surface
+        // (matching ``IslandWindowController.geometry``); otherwise
+        // we read the physical notch like before.
+        let mode = runtime.topSurfaceCustomization.current.hardwareNotchMode
+        let screen: NSScreen?
+        let notchSize: CGSize
+        let hasNotch: Bool
+        if mode == .forceFlat {
+            screen = NSScreen.main ?? NSScreen.screens.first
+            notchSize = CGSize(width: 224, height: 28)
+            hasNotch = false
+        } else {
+            screen = NSScreen.screens.first(where: { $0.deskmateHasPhysicalNotch })
+                ?? NSScreen.main
+            notchSize = screen?.deskmateNotchSize ?? CGSize(width: 224, height: 24)
+            hasNotch = screen?.deskmateHasPhysicalNotch == true
+        }
         let geometry = IslandInteractionGeometry(input: IslandInteractionInput(
             screenFrame: screen?.frame ?? CGRect(origin: .zero, size: bounds.size),
-            notchSize: screen?.deskmateNotchSize ?? CGSize(width: 224, height: 24),
-            hasPhysicalNotch: screen?.deskmateHasPhysicalNotch == true,
+            notchSize: notchSize,
+            hasPhysicalNotch: hasNotch,
             hasCompactPresence: hasCompactPresence(runtime),
             isExpanded: runtime.isIslandExpanded,
             activeCount: max(runtime.sessions.count, runtime.approvals.count)

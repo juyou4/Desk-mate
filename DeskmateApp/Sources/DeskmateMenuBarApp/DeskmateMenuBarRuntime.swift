@@ -33,6 +33,13 @@ public final class DeskmateMenuBarRuntime: ObservableObject {
     /// ``policy.islandOrderOut`` / ``policy.effectiveFPS(base:)``
     /// without juggling the raw integer.
     @Published public var degradationPolicy: DegradationPolicy = .init()
+    /// V10 I7: top-surface customization (theme, font scale, hover
+    /// speed, hardware-notch mode). Subscribed by
+    /// :class:`IslandWindowController` so toggling
+    /// ``hardwareNotchMode`` to ``.forceVirtual`` repositions the
+    /// island as a floating bar even on a real notched MBP. Updated
+    /// by Settings UI / future bridge intents.
+    public let topSurfaceCustomization = TopSurfaceCustomizationStore()
 
     public let shell: DeskmateShell
     public let sampler: PerceptionSampler

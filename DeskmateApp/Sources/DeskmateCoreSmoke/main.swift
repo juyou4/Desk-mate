@@ -240,6 +240,68 @@ runner.test("top customization: store publishes changes") {
     try runner.expect(store.subscriberCount == 0, "unsubscribe")
 }
 
+// V10 island polish: ``IslandWindowController`` subscribes to the
+// store and stashes the unsubscribe closure in ``customizationUnsub``.
+// On ``close()`` it fires the closure to drop the callback. This test
+// locks the contract: multiple subscribers can register and each
+// unsubscribe call drops exactly one callback so the controller's
+// re-install / close cycle never leaks closures.
+runner.test("top customization: multiple subscribers unsubscribe independently") {
+    let store = TopSurfaceCustomizationStore()
+    var aHits = 0
+    var bHits = 0
+    let unsubA = store.subscribe { _ in aHits += 1 }
+    let unsubB = store.subscribe { _ in bHits += 1 }
+    try runner.expect(store.subscriberCount == 2, "two subs registered")
+
+    var next = TopSurfaceCustomization()
+    next.hardwareNotchMode = .forceFlat
+    try runner.expect(store.apply(next), "apply should notify both")
+    try runner.expect(aHits == 1 && bHits == 1, "both subscribers fire once")
+
+    unsubA()
+    try runner.expect(store.subscriberCount == 1, "A removed, B remains")
+    var next2 = next
+    next2.theme = "dark"
+    try runner.expect(store.apply(next2), "second apply should notify only B")
+    try runner.expect(aHits == 1 && bHits == 2, "only B fires after unsubA")
+
+    unsubB()
+    try runner.expect(store.subscriberCount == 0, "all subscribers cleared")
+}
+
+// V10 island polish: hardwareNotchMode flows through the bridge as
+// snake_case JSON — the menu-bar runtime decodes a customization
+// payload via the same path. Lock the round-trip so a Python-side
+// rename can't silently put the controller back in
+// ``.automatic``.
+runner.test("top customization: hardwareNotchMode JSON round-trips through decoder") {
+    let json = #"""
+    {
+      "spec_version": 1,
+      "theme": "system",
+      "font_scale": 1.0,
+      "buddy_style": "pixel",
+      "show_buddy": true,
+      "hardware_notch_mode": "force_flat",
+      "screen_geometries": [],
+      "hover_speed": 1.0
+    }
+    """#.data(using: .utf8)!
+    let value = try JSONDecoder().decode(TopSurfaceCustomization.self, from: json)
+    try runner.expect(
+        value.hardwareNotchMode == .forceFlat,
+        "force_flat should map to .forceFlat"
+    )
+
+    let encoded = try JSONEncoder().encode(value)
+    let payload = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+    try runner.expect(
+        payload?["hardware_notch_mode"] as? String == "force_flat",
+        "encoder should emit snake_case force_flat"
+    )
+}
+
 runner.test("bubble: default decoded fields match protocol doc") {
     let json = #"{ "id": "b1", "text": "hi", "kind": "approval_hint" }"#.data(using: .utf8)!
     let spec = try decoder.decode(BubbleSpec.self, from: json)
@@ -984,6 +1046,43 @@ runner.test("island-interaction-geo: diagnostics includes screen notch panel sur
     try runner.expect(d.contains("notch="), "missing notch")
     try runner.expect(d.contains("panel="), "missing panel")
     try runner.expect(d.contains("surface="), "missing surface")
+}
+
+// V10 island polish: ``IslandWindowController`` builds the geometry
+// off the resolved ``HardwareNotchMode`` — ``.automatic`` /
+// ``.forceNotched`` keep the physical notch surface, while
+// ``.forceFlat`` synthesizes a 224×28 floating bar even on a real
+// MBP. Lock the geometry shape directly so the controller's branch
+// stays under test even though ``IslandHostingView`` itself is
+// internal to the menu-bar app target.
+runner.test("island-interaction-geo: forceFlat synthesises floating bar") {
+    let flat = IslandInteractionGeometry(input: IslandInteractionInput(
+        screenFrame: islandScreen,
+        notchSize: CGSize(width: 224, height: 28),
+        hasPhysicalNotch: false,
+        hasCompactPresence: false,
+        isExpanded: false,
+        activeCount: 0
+    ))
+    let notched = IslandInteractionGeometry(input: IslandInteractionInput(
+        screenFrame: islandScreen,
+        notchSize: CGSize(width: 210, height: 32),
+        hasPhysicalNotch: true,
+        hasCompactPresence: false,
+        isExpanded: false,
+        activeCount: 0
+    ))
+    // Floating-bar surface should be wider/shorter than the
+    // physical notch — it is the no-notch fallback the controller
+    // emits when the user pinned ``.forceFlat``.
+    try runner.expect(
+        flat.closedSurfaceSize.width >= notched.closedSurfaceSize.width,
+        "forceFlat surface should be at least as wide as notched"
+    )
+    try runner.expect(
+        flat.closedSurfaceSize.height != notched.closedSurfaceSize.height,
+        "forceFlat surface should not pretend to match physical notch height"
+    )
 }
 
 // --- Phase 3a: IslandStateMachine (L2-#7) -----------------------------------

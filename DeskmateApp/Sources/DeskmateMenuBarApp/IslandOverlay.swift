@@ -8,6 +8,20 @@ struct IslandOverlay: View {
     @ObservedObject var runtime: DeskmateMenuBarRuntime
     private let moduleRegistry = IslandModuleRegistry.deskmateDefaultModules()
 
+    /// V10 island polish: asymmetric springs for the
+    /// notch-surface transition, mirrored on the AppKit panel
+    /// frame in ``IslandWindowController.applyPanelFrame``. Open
+    /// snappy (response 0.42, damping 0.8 lets it overshoot
+    /// 1-2 px at the corners — boring.notch's signature look),
+    /// close deliberate (response 0.45, damping 1.0 — no bounce
+    /// so users don't perceive a "rebound" on dismiss).
+    private static let openSpring = Animation.spring(
+        response: 0.42, dampingFraction: 0.8, blendDuration: 0
+    )
+    private static let closeSpring = Animation.spring(
+        response: 0.45, dampingFraction: 1.0, blendDuration: 0
+    )
+
     var body: some View {
         GeometryReader { geometry in
             ZStack(alignment: .top) {
@@ -17,8 +31,20 @@ struct IslandOverlay: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .ignoresSafeArea()
-        .animation(.easeOut(duration: 0.22), value: isExpanded)
-        .animation(.easeOut(duration: 0.22), value: shouldShowCompactContent)
+        // Pick the asymmetric spring at runtime: the open path uses
+        // the snappier curve, the close path uses the slower
+        // critically-damped curve. Both run the same *physical*
+        // ``isExpanded`` change so SwiftUI can stitch them together
+        // without an extra phase variable.
+        .animation(
+            isExpanded ? Self.openSpring : Self.closeSpring,
+            value: isExpanded
+        )
+        // Compact-content visibility flips on a smaller curve — its
+        // appearance is decoupled from the surface size animation,
+        // so a session arriving while the user is hovering doesn't
+        // restart the open spring.
+        .animation(.easeOut(duration: 0.18), value: shouldShowCompactContent)
     }
 
     private func notchSurface(availableSize: CGSize) -> some View {
@@ -36,9 +62,25 @@ struct IslandOverlay: View {
             Group {
                 if isExpanded {
                     expandedContent
+                        // V10 island polish: expanded content slides
+                        // down + fades in from the top so it reads
+                        // as "growing out of the notch" instead of
+                        // popping in. ``move`` matches the AppKit
+                        // panel's growth direction so the rows
+                        // appear to come from inside the pill.
+                        .transition(.asymmetric(
+                            insertion: .opacity
+                                .combined(with: .move(edge: .top))
+                                .animation(Self.openSpring),
+                            removal: .opacity.animation(.easeIn(duration: 0.14))
+                        ))
                 } else if shouldShowCompactContent {
                     compactContent
                         .frame(height: surfaceHeight, alignment: .bottom)
+                        // Compact content fades in/out without
+                        // displacement — moving it would race the
+                        // notch height transition and look jittery.
+                        .transition(.opacity.animation(.easeOut(duration: 0.16)))
                 } else {
                     idleEdge
                 }

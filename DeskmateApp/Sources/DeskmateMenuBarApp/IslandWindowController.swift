@@ -47,9 +47,22 @@ final class IslandWindowController {
     /// same thing.
     private var hoverOpenCancelGrace: DispatchWorkItem?
     private var lastMouseMoveAt: CFTimeInterval = 0
-    private static let hoverOpenDelay: TimeInterval = 0.20
-    private static let hoverCloseDelay: TimeInterval = 0.14
-    private static let hoverOpenCancelGrace: TimeInterval = 0.10
+    /// V10 island polish: single source of truth for hover delays
+    /// and AppKit panel-frame durations. Tests in the smoke
+    /// binary lock the maths in
+    /// :class:`IslandAnimationTuning` directly so the controller
+    /// stays a thin wrapper around well-tested values.
+    private static let tuning = IslandAnimationTuning.default
+
+    /// V10 I7 hoverSpeed: the user-facing customization scales the
+    /// hover-open delay. ``hoverSpeed == 1.0`` keeps the default
+    /// 200 ms cadence (matches macOS Dynamic Island feel); a higher
+    /// value shortens the wait, a lower value lengthens it.
+    private var hoverOpenDelay: TimeInterval {
+        Self.tuning.resolvedHoverOpenDelay(
+            hoverSpeed: runtime.topSurfaceCustomization.current.hoverSpeed
+        )
+    }
 
     init(runtime: DeskmateMenuBarRuntime) {
         self.runtime = runtime
@@ -226,17 +239,19 @@ final class IslandWindowController {
               let host = w.contentView as? IslandHostingView<IslandOverlay>
         else { return }
 
-        if runtime.isIslandExpanded {
-            applyPanelFrame(forceExpanded: true)
-            w.ignoresMouseEvents = false
-        } else if isExpandedPanel(window: w) {
-            host.frame = panelFrame(forceExpanded: true)
-            w.ignoresMouseEvents = true
-        } else {
-            host.frame = panelFrame(forceExpanded: false)
-            w.ignoresMouseEvents = true
-            applyPanelFrame(forceExpanded: false)
-        }
+        // V10 island polish: the panel's AppKit frame tracks the
+        // SwiftUI ``NotchShape`` exactly — we no longer leave the
+        // panel pinned at expanded size while the surface is
+        // closed (which made hit-testing leak into the surrounding
+        // notch area). The branch that used to do
+        // ``host.frame = panelFrame(forceExpanded: true)`` while the
+        // window was still expanded created a brief frame where
+        // the AppKit panel and the SwiftUI surface disagreed —
+        // dropping it removes that visual stutter.
+        let expanded = runtime.isIslandExpanded
+        applyPanelFrame(forceExpanded: expanded, animated: true)
+        host.frame = panelFrame(forceExpanded: expanded)
+        w.ignoresMouseEvents = !expanded
         publishDiagnostics()
     }
 
@@ -314,7 +329,7 @@ final class IslandWindowController {
         return geometry(for: screen)
     }
 
-    private func applyPanelFrame(forceExpanded: Bool) {
+    private func applyPanelFrame(forceExpanded: Bool, animated: Bool = true) {
         guard let w = window,
               let screen = targetScreen(),
               let host = w.contentView as? IslandHostingView<IslandOverlay>
@@ -327,10 +342,28 @@ final class IslandWindowController {
             height: size.height
         )
         host.frame = NSRect(origin: .zero, size: size)
+        // V10 island polish: animate the AppKit panel frame so the
+        // surrounding panel grows/shrinks in sync with the SwiftUI
+        // ``NotchShape`` instead of snapping a frame ahead of (or
+        // behind) the SwiftUI animation. Asymmetric durations
+        // mirror boring.notch / MioIsland — opening is snappier
+        // (0.42 s) and closing is slightly slower (0.45 s, with
+        // damping=1.0 in SwiftUI) so the close lands without a
+        // bounce.
+        let duration = Self.tuning.panelFrameDuration(
+            forceExpanded: forceExpanded, animated: animated
+        )
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0
-            context.allowsImplicitAnimation = false
-            w.setFrame(rect, display: true)
+            context.duration = duration
+            context.timingFunction = CAMediaTimingFunction(
+                name: forceExpanded ? .easeOut : .easeInEaseOut
+            )
+            context.allowsImplicitAnimation = animated
+            if animated && duration > 0 {
+                w.animator().setFrame(rect, display: true)
+            } else {
+                w.setFrame(rect, display: true)
+            }
         }
     }
 
@@ -339,6 +372,12 @@ final class IslandWindowController {
         let expanded = panelSize(for: screen, forceExpanded: true)
         return abs(w.frame.width - expanded.width) < 1
             && abs(w.frame.height - expanded.height) < 1
+    }
+
+    /// Diagnostic-only helper — exposed for tests so they can
+    /// confirm the controller pinned the panel at the right size.
+    var debugPanelSize: CGSize? {
+        window?.frame.size
     }
 
     private func publishDiagnostics() {
@@ -387,9 +426,18 @@ final class IslandWindowController {
     }
 
     private func repositionForCurrentScreen() {
-        guard let w = window else { return }
+        guard let w = window,
+              let host = w.contentView as? IslandHostingView<IslandOverlay>
+        else { return }
+        // Screen hot-plug must teleport instantly — animating from
+        // the old display's coordinates to the new one would draw
+        // a confusing mid-screen ghost frame.
         positionAtTopCenter(window: w)
-        resizeForCurrentState()
+        let expanded = runtime.isIslandExpanded
+        applyPanelFrame(forceExpanded: expanded, animated: false)
+        host.frame = panelFrame(forceExpanded: expanded)
+        w.ignoresMouseEvents = !expanded
+        publishDiagnostics()
     }
 
     // MARK: - Mouse monitors
@@ -488,7 +536,7 @@ final class IslandWindowController {
         }
         hoverOpenWorkItem = item
         DispatchQueue.main.asyncAfter(
-            deadline: .now() + Self.hoverOpenDelay, execute: item
+            deadline: .now() + hoverOpenDelay, execute: item
         )
     }
 
@@ -507,7 +555,7 @@ final class IslandWindowController {
         }
         hoverOpenCancelGrace = grace
         DispatchQueue.main.asyncAfter(
-            deadline: .now() + Self.hoverOpenCancelGrace,
+            deadline: .now() + Self.tuning.hoverOpenCancelGrace,
             execute: grace
         )
     }
@@ -521,7 +569,7 @@ final class IslandWindowController {
         }
         hoverCloseWorkItem = item
         DispatchQueue.main.asyncAfter(
-            deadline: .now() + Self.hoverCloseDelay, execute: item
+            deadline: .now() + Self.tuning.hoverCloseDelay, execute: item
         )
     }
 

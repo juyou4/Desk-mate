@@ -1085,6 +1085,123 @@ runner.test("island-interaction-geo: forceFlat synthesises floating bar") {
     )
 }
 
+// --- V10 island polish: IslandAnimationTuning -------------------------------
+//
+// These tests lock the timings the menu-bar layer uses for the
+// expand/collapse animation. They live here so a refactor of
+// ``IslandWindowController`` can't quietly retune the asymmetric
+// open/close springs without surfacing the change in CI.
+
+runner.test("island-tuning: defaults match boring.notch / MioIsland conventions") {
+    let t = IslandAnimationTuning.default
+    try runner.expect(
+        abs(t.hoverOpenBaseDelay - 0.20) < 0.001,
+        "hover-open base should be 200 ms (Dynamic Island feel)"
+    )
+    try runner.expect(
+        abs(t.hoverCloseDelay - 0.14) < 0.001,
+        "hover-close should be 140 ms"
+    )
+    try runner.expect(
+        t.panelCloseDuration > t.panelOpenDuration,
+        "close should be slower than open: open=\(t.panelOpenDuration) close=\(t.panelCloseDuration)"
+    )
+}
+
+runner.test("island-tuning: hoverSpeed=1.0 returns base delay") {
+    let t = IslandAnimationTuning.default
+    let d = t.resolvedHoverOpenDelay(hoverSpeed: 1.0)
+    try runner.expect(
+        abs(d - t.hoverOpenBaseDelay) < 0.001,
+        "1.0 should map to base delay, got \(d)"
+    )
+}
+
+runner.test("island-tuning: hoverSpeed=2.0 halves the delay") {
+    let t = IslandAnimationTuning.default
+    let d = t.resolvedHoverOpenDelay(hoverSpeed: 2.0)
+    try runner.expect(
+        abs(d - t.hoverOpenBaseDelay / 2.0) < 0.001,
+        "2.0 should halve the delay, got \(d)"
+    )
+}
+
+runner.test("island-tuning: hoverSpeed=0 maps to instant (MioIsland parity)") {
+    let t = IslandAnimationTuning.default
+    let d = t.resolvedHoverOpenDelay(hoverSpeed: 0)
+    try runner.expect(d == 0, "0 should return 0, got \(d)")
+}
+
+runner.test("island-tuning: hoverSpeed clamps protect against typoed values") {
+    let t = IslandAnimationTuning.default
+    // Way below clamp — should saturate at hoverSpeedMin (0.25)
+    // and produce the longest delay we'll ever emit.
+    let slow = t.resolvedHoverOpenDelay(hoverSpeed: 0.001)
+    let slowExpected = t.hoverOpenBaseDelay / t.hoverSpeedMin
+    try runner.expect(
+        abs(slow - slowExpected) < 0.001,
+        "tiny positive speed should clamp at min: got \(slow) expected \(slowExpected)"
+    )
+    // Way above clamp — should saturate at hoverSpeedMax (4.0).
+    let fast = t.resolvedHoverOpenDelay(hoverSpeed: 1000.0)
+    let fastExpected = t.hoverOpenBaseDelay / t.hoverSpeedMax
+    try runner.expect(
+        abs(fast - fastExpected) < 0.001,
+        "huge speed should clamp at max: got \(fast) expected \(fastExpected)"
+    )
+}
+
+runner.test("island-tuning: panelFrameDuration switches on direction") {
+    let t = IslandAnimationTuning.default
+    try runner.expect(
+        t.panelFrameDuration(forceExpanded: true, animated: true) == t.panelOpenDuration,
+        "open path should pick panelOpenDuration"
+    )
+    try runner.expect(
+        t.panelFrameDuration(forceExpanded: false, animated: true) == t.panelCloseDuration,
+        "close path should pick panelCloseDuration"
+    )
+}
+
+runner.test("island-tuning: panelFrameDuration is 0 when animated=false") {
+    let t = IslandAnimationTuning.default
+    try runner.expect(
+        t.panelFrameDuration(forceExpanded: true, animated: false) == 0,
+        "animated=false should produce instant snap, even on open"
+    )
+    try runner.expect(
+        t.panelFrameDuration(forceExpanded: false, animated: false) == 0,
+        "animated=false should produce instant snap, even on close"
+    )
+}
+
+runner.test("island-tuning: hoverSpeed JSON round-trips through customization") {
+    let json = #"""
+    {
+      "spec_version": 1,
+      "theme": "system",
+      "font_scale": 1.0,
+      "buddy_style": "pixel",
+      "show_buddy": true,
+      "hardware_notch_mode": "automatic",
+      "screen_geometries": [],
+      "hover_speed": 2.5
+    }
+    """#.data(using: .utf8)!
+    let custom = try JSONDecoder().decode(TopSurfaceCustomization.self, from: json)
+    try runner.expect(
+        abs(custom.hoverSpeed - 2.5) < 0.001,
+        "hover_speed should decode to 2.5, got \(custom.hoverSpeed)"
+    )
+    let t = IslandAnimationTuning.default
+    let d = t.resolvedHoverOpenDelay(hoverSpeed: custom.hoverSpeed)
+    let expected = t.hoverOpenBaseDelay / 2.5
+    try runner.expect(
+        abs(d - expected) < 0.001,
+        "controller should land at \(expected) for speed=2.5, got \(d)"
+    )
+}
+
 // --- Phase 3a: IslandStateMachine (L2-#7) -----------------------------------
 
 runner.test("island-sm: present from empty is slideIn") {

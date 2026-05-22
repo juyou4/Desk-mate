@@ -66,7 +66,8 @@ let sampler = PerceptionSampler(
         heartbeatInterval: 30.0,
         idleSecondsForIdleState: 30.0,
         idleProvider: DefaultPerceptionProviders.idleSeconds,
-        frontmostAppProvider: { frontmostProvider() }
+        frontmostAppProvider: { frontmostProvider() },
+        pacer: PerceptionPacer()
     )
 )
 

@@ -2865,6 +2865,190 @@ runner.test("perception-sampler: cached frontmost provider honors ttl") {
     try runner.expect(cached().bundleId == "app.3", "invalidate should force refresh")
 }
 
+// --- V10 L3-B10 / E1 / E2: adaptive perception pacing -----------------------
+
+runner.test("perception-pacer: maps focus tiers to monotonic intervals") {
+    let pacer = PerceptionPacer()
+    try runner.expect(pacer.interval(for: .focused) == 1.0, "focused 1s")
+    try runner.expect(pacer.interval(for: .casual) == 2.0, "casual 2s")
+    try runner.expect(pacer.interval(for: .idleBack) == 5.0, "idleBack 5s")
+}
+
+runner.test("perception-pacer: monotonic guard widens out-of-order overrides") {
+    // Caller mistakenly asks for casual=0.5s (tighter than focused=1s).
+    // Guard must clamp casual ≥ focused so a config typo can't make
+    // the sampler tighter on idle than on active.
+    let pacer = PerceptionPacer(
+        focusedInterval: 1.0,
+        casualInterval: 0.5,
+        idleBackInterval: 0.2
+    )
+    try runner.expect(pacer.casualInterval == 1.0, "casual should widen to focused")
+    try runner.expect(pacer.idleBackInterval == 1.0, "idleBack should widen to casual")
+}
+
+runner.test("perception-pacer: asleep returns nil regardless of focus") {
+    let pacer = PerceptionPacer()
+    try runner.expect(
+        pacer.interval(for: .focused, isAsleep: true) == nil,
+        "asleep must override focused"
+    )
+    try runner.expect(
+        pacer.interval(for: .idleBack, isAsleep: true) == nil,
+        "asleep must override idleBack"
+    )
+}
+
+runner.test("perception-sampler: pacer reschedules timer after focus drift") {
+    let sender = SmokeRecordingSender()
+    let scenario = SmokeSamplerScenario()
+    // Force focused → idleBack via the focus inferrer.
+    scenario.idle = 0
+    let s = PerceptionSampler(
+        sender: sender,
+        configuration: .init(
+            tickInterval: 60,  // ignored when pacer is set
+            heartbeatInterval: 30,
+            idleProvider: { scenario.idle },
+            frontmostAppProvider: { scenario.app },
+            clock: { scenario.nowMs },
+            pacer: PerceptionPacer()
+        )
+    )
+    s.tick()
+    try runner.expect(
+        abs(s.currentTickInterval - 1.0) < 0.01,
+        "expected focused interval 1s, got \(s.currentTickInterval)"
+    )
+
+    // Drift to casual.
+    scenario.idle = 30
+    scenario.nowMs += 1_000
+    s.tick()
+    try runner.expect(
+        abs(s.currentTickInterval - 2.0) < 0.01,
+        "expected casual interval 2s, got \(s.currentTickInterval)"
+    )
+
+    // Drift to idleBack.
+    scenario.idle = 200
+    scenario.nowMs += 30_000
+    s.tick()
+    try runner.expect(
+        abs(s.currentTickInterval - 5.0) < 0.01,
+        "expected idleBack interval 5s, got \(s.currentTickInterval)"
+    )
+    try runner.expect(s.rescheduleCount >= 2, "expected at least 2 reschedules")
+}
+
+runner.test("perception-sampler: pacer holds steady on same focus tier") {
+    let sender = SmokeRecordingSender()
+    let scenario = SmokeSamplerScenario()
+    let s = PerceptionSampler(
+        sender: sender,
+        configuration: .init(
+            tickInterval: 60,
+            heartbeatInterval: 30,
+            idleProvider: { scenario.idle },
+            frontmostAppProvider: { scenario.app },
+            clock: { scenario.nowMs },
+            pacer: PerceptionPacer()
+        )
+    )
+    s.tick()
+    let initialReschedules = s.rescheduleCount
+    s.tick()
+    s.tick()
+    // Same focus → no extra reschedule beyond what the start-up
+    // `tickLocked` may have produced.
+    try runner.expect(
+        s.rescheduleCount == initialReschedules,
+        "expected no extra reschedules: \(s.rescheduleCount)"
+    )
+}
+
+runner.test("perception-sampler: noteFrontmostChanged triggers immediate send") {
+    let sender = SmokeRecordingSender()
+    let scenario = SmokeSamplerScenario()
+    let s = PerceptionSampler(
+        sender: sender,
+        configuration: .init(
+            tickInterval: 60,
+            heartbeatInterval: 30,
+            idleProvider: { scenario.idle },
+            frontmostAppProvider: { scenario.app },
+            clock: { scenario.nowMs },
+            pacer: PerceptionPacer()
+        )
+    )
+    s.tick()
+    let baseline = sender.perceptions.count
+
+    // Simulate the user switching apps. The runtime would also
+    // invalidate the cached frontmost provider, but here we just
+    // mutate the scenario directly.
+    scenario.app = .init(bundleId: "com.apple.Safari", title: "Safari")
+    scenario.nowMs += 100
+    s.noteFrontmostChanged()
+
+    try runner.expect(
+        sender.perceptions.count == baseline + 1,
+        "expected one extra perception send, got \(sender.perceptions.count - baseline)"
+    )
+    try runner.expect(
+        sender.perceptions.last?.app == "com.apple.Safari",
+        "freshly switched app not on the wire"
+    )
+}
+
+runner.test("perception-sampler: noteFrontmostChanged is a no-op while paused") {
+    let sender = SmokeRecordingSender()
+    let scenario = SmokeSamplerScenario()
+    let s = PerceptionSampler(
+        sender: sender,
+        configuration: .init(
+            tickInterval: 60,
+            heartbeatInterval: 30,
+            idleProvider: { scenario.idle },
+            frontmostAppProvider: { scenario.app },
+            clock: { scenario.nowMs },
+            pacer: PerceptionPacer()
+        )
+    )
+    s.setPaused(true)
+    s.noteFrontmostChanged()
+    try runner.expect(
+        sender.perceptions.isEmpty,
+        "paused sampler should never send"
+    )
+}
+
+runner.test("perception-sampler: unpause reschedules to current focus") {
+    let sender = SmokeRecordingSender()
+    let scenario = SmokeSamplerScenario()
+    let s = PerceptionSampler(
+        sender: sender,
+        configuration: .init(
+            tickInterval: 60,
+            heartbeatInterval: 30,
+            idleProvider: { scenario.idle },
+            frontmostAppProvider: { scenario.app },
+            clock: { scenario.nowMs },
+            pacer: PerceptionPacer()
+        )
+    )
+    s.tick()
+    let pacedInterval = s.currentTickInterval
+    s.setPaused(true)
+    s.setPaused(false)
+    // After unpausing we should be back at the same paced interval
+    // (no need to wait for a tick to re-arm).
+    try runner.expect(
+        abs(s.currentTickInterval - pacedInterval) < 0.01,
+        "unpause should restore paced cadence: \(s.currentTickInterval)"
+    )
+}
+
 runner.test("default-socket-path: ends with Deskmate/ipc.sock") {
     let path = DefaultSocketPath.current()
     try runner.expect(path.hasSuffix("Deskmate/ipc.sock"), "unexpected path: \(path)")

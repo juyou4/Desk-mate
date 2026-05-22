@@ -51,9 +51,13 @@ public final class DeskmateMenuBarRuntime: ObservableObject {
     private var powerDegradationLevel: Int = 0
     private var islandTickTimer: Timer?
     private var powerObserver: NSObjectProtocol?
+    /// V10 L3-C2 — held strongly so we can ``invalidate()`` on a
+    /// frontmost-app switch (V10 L3-E2).
+    private let frontmostProvider: CachedFrontmostAppProvider
     #if canImport(AppKit)
     private var sleepObserver: NSObjectProtocol?
     private var wakeObserver: NSObjectProtocol?
+    private var didActivateObserver: NSObjectProtocol?
     #endif
 
     public init() {
@@ -73,6 +77,7 @@ public final class DeskmateMenuBarRuntime: ObservableObject {
         let frontmostProvider = CachedFrontmostAppProvider(
             provider: DefaultPerceptionProviders.frontmostApp
         )
+        self.frontmostProvider = frontmostProvider
         self.sampler = PerceptionSampler(
             sender: shell,
             configuration: .init(
@@ -80,7 +85,8 @@ public final class DeskmateMenuBarRuntime: ObservableObject {
                 heartbeatInterval: 30.0,
                 idleSecondsForIdleState: 30.0,
                 idleProvider: DefaultPerceptionProviders.idleSeconds,
-                frontmostAppProvider: { frontmostProvider() }
+                frontmostAppProvider: { frontmostProvider() },
+                pacer: PerceptionPacer()
             )
         )
         #if canImport(AppKit)
@@ -378,6 +384,21 @@ public final class DeskmateMenuBarRuntime: ObservableObject {
                 self.sampler.tick()
             }
         }
+        // V10 L3-E2: passive frontmost listener — every app switch
+        // invalidates the cached provider and immediately pushes
+        // a fresh perception so Python sees the new app within
+        // milliseconds rather than waiting for the next paced tick.
+        didActivateObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.frontmostProvider.invalidate()
+                self.sampler.noteFrontmostChanged()
+            }
+        }
         #endif
     }
 
@@ -393,8 +414,12 @@ public final class DeskmateMenuBarRuntime: ObservableObject {
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
         }
+        if let didActivateObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(didActivateObserver)
+        }
         sleepObserver = nil
         wakeObserver = nil
+        didActivateObserver = nil
         #endif
     }
 

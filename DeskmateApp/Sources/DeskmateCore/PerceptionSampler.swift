@@ -62,6 +62,11 @@ public final class PerceptionSampler {
         public var frontmostAppProvider: FrontmostAppProvider
         public var focusInferrer: FocusInferrer
         public var clock: Clock
+        /// V10 L3-B10 / E1: optional adaptive pacer. When present the
+        /// sampler reschedules its timer after every tick to the
+        /// pacer's preferred interval for the current focus tier.
+        /// Leave ``nil`` to keep the old fixed-cadence behaviour.
+        public var pacer: PerceptionPacer?
 
         public init(
             tickInterval: TimeInterval = 1.0,
@@ -72,7 +77,8 @@ public final class PerceptionSampler {
             focusInferrer: @escaping FocusInferrer = PerceptionSampler.defaultFocusInferrer,
             clock: @escaping Clock = {
                 Int(Date().timeIntervalSince1970 * 1000)
-            }
+            },
+            pacer: PerceptionPacer? = nil
         ) {
             self.tickInterval = tickInterval
             self.heartbeatInterval = heartbeatInterval
@@ -81,6 +87,7 @@ public final class PerceptionSampler {
             self.frontmostAppProvider = frontmostAppProvider
             self.focusInferrer = focusInferrer
             self.clock = clock
+            self.pacer = pacer
         }
     }
 
@@ -93,7 +100,13 @@ public final class PerceptionSampler {
     private var lastSent: PerceptionSnapshot?
     private var lastSentAtMs: Int = 0
     private var paused: Bool = false
+    private var lastFocus: UserFocus = .casual
+    private var currentInterval: TimeInterval = 0
     private(set) public var sentCount: Int = 0
+    /// V10 L3-B10: count of timer reschedules so tests can assert
+    /// the pacer actually drove a change. Bumped only when the new
+    /// interval differs from the one already armed.
+    private(set) public var rescheduleCount: Int = 0
 
     // MARK: - Init
 
@@ -110,10 +123,14 @@ public final class PerceptionSampler {
     public func start() {
         queue.sync {
             guard timer == nil else { return }
+            let initial = configuration.pacer?.interval(
+                for: lastFocus, isAsleep: paused
+            ) ?? configuration.tickInterval
+            currentInterval = initial
             let src = DispatchSource.makeTimerSource(queue: queue)
             src.schedule(
                 deadline: .now(),
-                repeating: configuration.tickInterval
+                repeating: initial > 0 ? initial : configuration.tickInterval
             )
             src.setEventHandler { [weak self] in self?.tickLocked() }
             timer = src
@@ -140,7 +157,31 @@ public final class PerceptionSampler {
     /// be shown. The dedupe cursor is preserved; on resume the next
     /// changed snapshot or heartbeat flows normally.
     public func setPaused(_ value: Bool) {
-        queue.sync { paused = value }
+        queue.sync {
+            paused = value
+            // When transitioning out of paused, ask the pacer to
+            // re-arm at the right cadence for the current focus
+            // tier. Entering paused is a no-op for the timer; the
+            // ``tickLocked`` guard already shorts every fire.
+            if !paused { rescheduleIfNeededLocked() }
+        }
+    }
+
+    /// V10 L3-E2 — passive frontmost listener. Call from the app's
+    /// :class:`NSWorkspace` `didActivateApplicationNotification`
+    /// hook so the next perception send happens immediately instead
+    /// of waiting up to ``focusedInterval`` seconds. Honours pause:
+    /// while ``isPaused`` is true we drop the request so a wake
+    /// notification can't smuggle a tick past the screen-off guard.
+    public func noteFrontmostChanged() {
+        queue.sync {
+            guard !paused else { return }
+            tickLocked()
+        }
+    }
+
+    public var currentTickInterval: TimeInterval {
+        queue.sync { currentInterval }
     }
 
     public var isPaused: Bool {
@@ -152,6 +193,11 @@ public final class PerceptionSampler {
     private func tickLocked() {
         guard !paused else { return }
         let snapshot = buildSnapshotLocked()
+        // Update the focus tracker before any send-or-skip decision
+        // so the next reschedule sees the freshest tier even when
+        // the snapshot didn't change perceptually.
+        lastFocus = snapshot.focus
+        defer { rescheduleIfNeededLocked() }
         guard shouldSendLocked(snapshot) else { return }
         do {
             try sender.sendPerception(snapshot)
@@ -163,6 +209,43 @@ public final class PerceptionSampler {
             // retries delivering the same state (don't advance the
             // dedupe cursor on failure).
         }
+    }
+
+    /// V10 L3-B10: re-arm the timer if the pacer recommends a
+    /// different interval than the one we currently have armed.
+    /// No-op when no pacer is configured. Updates ``currentInterval``
+    /// even when the underlying timer is nil (e.g. the sampler is
+    /// being driven manually via ``tick()`` in unit tests) so
+    /// callers reading ``currentTickInterval`` always see the
+    /// pacer's logical answer.
+    private func rescheduleIfNeededLocked() {
+        guard let pacer = configuration.pacer else { return }
+        guard let target = pacer.interval(for: lastFocus, isAsleep: paused) else {
+            // ``nil`` means "pause until a state change". We do that
+            // by widening the interval to a very large value so the
+            // timer effectively never fires; ``setPaused(false)`` /
+            // ``noteFrontmostChanged`` will reschedule us back.
+            armTimerLocked(repeating: 86_400)
+            return
+        }
+        guard abs(target - currentInterval) > 0.01 else { return }
+        armTimerLocked(repeating: target)
+    }
+
+    private func armTimerLocked(repeating interval: TimeInterval) {
+        // Always reflect the pacer's intent in the logical
+        // ``currentInterval`` so ``currentTickInterval`` is honest
+        // for tests / diagnostics; only physically reschedule the
+        // GCD timer when one is currently armed.
+        if abs(interval - currentInterval) > 0.01 {
+            currentInterval = interval
+            rescheduleCount += 1
+        }
+        guard let timer else { return }
+        timer.schedule(
+            deadline: .now() + interval,
+            repeating: interval
+        )
     }
 
     private func buildSnapshotLocked() -> PerceptionSnapshot {

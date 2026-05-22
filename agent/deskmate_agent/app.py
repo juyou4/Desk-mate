@@ -869,6 +869,19 @@ class App:
                 source=action.source.value,
                 surface=action.payload.get("surface"),
             )
+        else:
+            # V10 L1-F catch-all: every typed kind must surface as a
+            # structured log line, never get silently dropped.
+            # ``TASK_OPEN_DETAIL / PET_INTERACT / PET_DRAG / PET_NEST``
+            # currently land here as no-ops; future skills that bind to
+            # them should add their own ``elif`` branch above.
+            _LOG.info(
+                "app.interaction_unhandled",
+                kind=action.kind.value,
+                source=action.source.value,
+                target=action.target.value,
+                payload_keys=sorted(action.payload.keys()),
+            )
 
     async def _handle_session_jump_result(self, result) -> None:
         if result.effect in {

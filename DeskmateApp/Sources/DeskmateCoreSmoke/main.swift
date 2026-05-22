@@ -575,6 +575,42 @@ runner.test("pack: missing required states reported") {
     )
 }
 
+runner.test("pack: bundled pixel_default has every frame on disk") {
+    // V10 L1-D / A1+A13: the shipped pack must round-trip through the
+    // loader as ``isFullyResolved``. Walk up from this Swift source
+    // file to the repo's ``assets/packs/pixel_default`` directory.
+    let smokeFile = URL(fileURLWithPath: #file)
+    let bundled = smokeFile
+        .deletingLastPathComponent()  // DeskmateCoreSmoke
+        .deletingLastPathComponent()  // Sources
+        .deletingLastPathComponent()  // DeskmateApp
+        .deletingLastPathComponent()  // <repo root>
+        .appendingPathComponent("assets")
+        .appendingPathComponent("packs")
+        .appendingPathComponent(CharacterPackEnv.builtinPackId)
+    try runner.expect(
+        FileManager.default.fileExists(atPath: bundled.path),
+        "bundled pack root missing at \(bundled.path)"
+    )
+    let loaded = try CharacterPackLoader().load(from: bundled)
+    try runner.expect(
+        loaded.manifest.id == CharacterPackEnv.builtinPackId,
+        "manifest id mismatch: \(loaded.manifest.id)"
+    )
+    try runner.expect(
+        loaded.missingFrames.isEmpty,
+        "bundled pack still has missing frames: \(loaded.missingFrames)"
+    )
+    try runner.expect(
+        loaded.missingRequiredStates.isEmpty,
+        "bundled pack missing required states: \(loaded.missingRequiredStates)"
+    )
+    try runner.expect(
+        loaded.isFullyResolved,
+        "bundled pixel_default pack should be fully resolved"
+    )
+}
+
 // --- Phase 2a: BubbleQueue (V10 I3) -----------------------------------------
 
 func mkBubble(_ id: String, priority: Priority = .p2, ttl: Int? = 8000) -> BubbleSpec {

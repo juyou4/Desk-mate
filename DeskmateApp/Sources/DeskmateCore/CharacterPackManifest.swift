@@ -167,6 +167,16 @@ public struct StateFrames: Codable, Sendable, Equatable {
         self.fps = fps
         self.frames = frames
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case fps, frames
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.fps = try c.decodeIfPresent(Int.self, forKey: .fps) ?? 4
+        self.frames = try c.decodeIfPresent([String].self, forKey: .frames) ?? []
+    }
 }
 
 public struct IdleTransitionRule: Codable, Sendable, Equatable {
@@ -176,6 +186,16 @@ public struct IdleTransitionRule: Codable, Sendable, Equatable {
     public init(to: String, probability: Double = 0) {
         self.to = to
         self.probability = probability
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case to, probability
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.to = try c.decode(String.self, forKey: .to)
+        self.probability = try c.decodeIfPresent(Double.self, forKey: .probability) ?? 0
     }
 }
 
@@ -192,6 +212,17 @@ public struct BubbleConfig: Codable, Sendable, Equatable {
         self.icon = icon
         self.sounds = sounds
         self.templates = templates
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case icon, sounds, templates
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.icon = try c.decodeIfPresent(String.self, forKey: .icon)
+        self.sounds = try c.decodeIfPresent([String: String].self, forKey: .sounds) ?? [:]
+        self.templates = try c.decodeIfPresent([String: String].self, forKey: .templates) ?? [:]
     }
 }
 
@@ -210,5 +241,12 @@ public struct AccessoryAction: Codable, Sendable, Equatable {
         case name
         case actList = "act_list"
         case accList = "acc_list"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.name = try c.decode(String.self, forKey: .name)
+        self.actList = try c.decodeIfPresent([String].self, forKey: .actList) ?? []
+        self.accList = try c.decodeIfPresent([String].self, forKey: .accList) ?? []
     }
 }

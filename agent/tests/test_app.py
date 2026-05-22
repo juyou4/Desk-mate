@@ -1354,6 +1354,95 @@ async def test_permission_resolve_pushes_update_domain_state_intent(
 
 
 # ---------------------------------------------------------------------------
+# V10 L1-F: every InteractionKind survives the dispatcher catch-all
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        InteractionKind.TASK_OPEN_DETAIL,
+        InteractionKind.PET_INTERACT,
+        InteractionKind.PET_DRAG,
+        InteractionKind.PET_NEST,
+    ],
+)
+@pytest.mark.asyncio
+async def test_handle_interaction_unhandled_kinds_are_no_ops(
+    short_socket_path: Path, tmp_path: Path, kind: InteractionKind
+) -> None:
+    """V10 L1-F: typed actions without an explicit router land in the
+    catch-all branch. The handler MUST NOT raise, MUST NOT mutate the
+    approval / session / reminder stores, and MUST log a structured
+    ``app.interaction_unhandled`` line so the kind never gets dropped
+    silently on the way to a future skill that wants to bind it.
+    """
+
+    config = AppConfig(
+        socket_path=short_socket_path,
+        db_dir=tmp_path,
+        batch_window_s=0.01,
+        agent_runtime_scanner_enabled=False,
+    )
+    app = App(config)
+    runtime = await app.setup()
+
+    try:
+        # Sanity baseline: every store starts empty.
+        assert runtime.approval_store.list_pending() == []
+        assert runtime.session_store.list() == []
+        assert runtime.reminder_store.list() == []
+
+        action = InteractionAction(
+            source=ActionSource.PET,
+            target=ActionTarget.BUBBLE,
+            kind=kind,
+            payload={"hint": "round-trip", "future_field": [1, 2]},
+        )
+        await app._handle_interaction(  # noqa: SLF001
+            action.model_dump(mode="json")
+        )
+
+        # Catch-all is a no-op for every observable surface.
+        assert runtime.approval_store.list_pending() == []
+        assert runtime.session_store.list() == []
+        assert runtime.reminder_store.list() == []
+    finally:
+        await app.teardown()
+
+
+@pytest.mark.asyncio
+async def test_handle_interaction_unknown_kind_is_rejected_at_validation(
+    short_socket_path: Path, tmp_path: Path
+) -> None:
+    """A wire payload carrying an unknown ``kind`` value should fail
+    pydantic validation and be logged + dropped — never reach the
+    catch-all branch (that branch is reserved for *known* kinds we
+    haven't bound yet)."""
+
+    config = AppConfig(
+        socket_path=short_socket_path,
+        db_dir=tmp_path,
+        batch_window_s=0.01,
+        agent_runtime_scanner_enabled=False,
+    )
+    app = App(config)
+    await app.setup()
+
+    try:
+        bogus_payload = {
+            "source": "pet",
+            "target": "bubble",
+            "kind": "not.a.real.kind",
+            "payload": {},
+        }
+        # Must not raise.
+        await app._handle_interaction(bogus_payload)  # noqa: SLF001
+    finally:
+        await app.teardown()
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

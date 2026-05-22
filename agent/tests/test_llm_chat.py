@@ -1035,3 +1035,171 @@ async def test_default_llm_prewarm_swallows_failures(
 
     # Must complete without raising.
     await default_llm_prewarm(timeout_s=0.2)
+
+
+
+# ---------------------------------------------------------------------------
+# V10 L3-B3: tiered model selection
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_make_default_composer_picks_reactive_model_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``DESKMATE_LLM_MODEL_REACTIVE`` wins over the generic
+    ``DESKMATE_LLM_MODEL`` for ``skill_mode == "reactive"``."""
+
+    monkeypatch.setenv("DESKMATE_LLM_API_KEY", "sk-test")
+    monkeypatch.setenv("DESKMATE_LLM_MODEL", "fallback-model")
+    monkeypatch.setenv("DESKMATE_LLM_MODEL_REACTIVE", "big-reactive-model")
+    monkeypatch.delenv("DESKMATE_LLM_MODEL_PROACTIVE", raising=False)
+
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["model"] = json.loads(request.content)["model"]
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "ok"}}]},
+        )
+
+    # Inject the mock client by overriding the env-driven path with
+    # a direct ``openai_compat_composer`` call that mirrors what
+    # ``make_default_composer`` would build, plus an env probe to
+    # verify the resolver actually picks the right model.
+    from deskmate_agent.skills.llm_chat import _resolve_tiered_model
+
+    assert _resolve_tiered_model("reactive") == "big-reactive-model"
+    assert _resolve_tiered_model("proactive") == "fallback-model"
+
+    compose = openai_compat_composer(
+        base_url="https://api.test/v1",
+        api_key="sk-test",
+        model=_resolve_tiered_model("reactive"),
+        client=_client(handler),
+    )
+    await compose("hi")
+    assert captured["model"] == "big-reactive-model"
+
+
+@pytest.mark.asyncio
+async def test_make_default_composer_picks_proactive_model_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DESKMATE_LLM_API_KEY", "sk-test")
+    monkeypatch.setenv("DESKMATE_LLM_MODEL", "fallback-model")
+    monkeypatch.setenv("DESKMATE_LLM_MODEL_PROACTIVE", "cheap-proactive-model")
+    monkeypatch.delenv("DESKMATE_LLM_MODEL_REACTIVE", raising=False)
+
+    from deskmate_agent.skills.llm_chat import _resolve_tiered_model
+
+    assert _resolve_tiered_model("reactive") == "fallback-model"
+    assert _resolve_tiered_model("proactive") == "cheap-proactive-model"
+
+
+@pytest.mark.asyncio
+async def test_tiered_model_falls_back_when_no_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No tier-specific override → both modes use ``DESKMATE_LLM_MODEL``."""
+
+    monkeypatch.setenv("DESKMATE_LLM_API_KEY", "sk-test")
+    monkeypatch.setenv("DESKMATE_LLM_MODEL", "shared-model")
+    monkeypatch.delenv("DESKMATE_LLM_MODEL_PROACTIVE", raising=False)
+    monkeypatch.delenv("DESKMATE_LLM_MODEL_REACTIVE", raising=False)
+
+    from deskmate_agent.skills.llm_chat import _resolve_tiered_model
+
+    assert _resolve_tiered_model("reactive") == "shared-model"
+    assert _resolve_tiered_model("proactive") == "shared-model"
+
+
+# ---------------------------------------------------------------------------
+# V10 L3-B5: streaming first-token timeout
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_streaming_composer_first_token_timeout_falls_back() -> None:
+    """A model that opens the stream but never sends a first token
+    inside the deadline must fall through to the configured fallback."""
+
+    from deskmate_agent.skills import openai_compat_streaming_composer
+
+    # The mock transport's streaming body iterates over the bytes
+    # we hand it. To simulate "open but never any token", emit
+    # only a SSE comment line (which the parser ignores) and never
+    # close the stream — but httpx's MockTransport will still close
+    # at end-of-bytes. Closer surrogate: emit ZERO data events,
+    # so first_token_logged stays False and the deadline fires
+    # only when the iterator is awaited longer than the budget.
+    async def slow_stream() -> bytes:
+        await asyncio.sleep(0.5)
+        return b": ping\n\n"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Body that takes longer than the deadline to produce any
+        # parseable line. ``httpx.MockTransport`` runs the handler
+        # to completion before returning the response, so an async
+        # body that sleeps achieves the same effect as a slow LLM.
+        async def body():
+            await asyncio.sleep(0.5)
+            yield b": ping\n\n"
+        return httpx.Response(
+            200,
+            content=body(),
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    canned_calls: list[str] = []
+
+    async def fallback(text: str) -> str | None:
+        canned_calls.append(text)
+        return f"canned:{text}"
+
+    compose = openai_compat_streaming_composer(
+        base_url="https://api.test/v1",
+        api_key="sk-test",
+        model="gpt-test",
+        client=_client(handler),
+        fallback=fallback,
+        first_token_timeout_s=0.1,
+    )
+    tokens = [t async for t in compose("hi")]
+    assert tokens == ["canned:hi"]
+    assert canned_calls == ["hi"]
+
+
+@pytest.mark.asyncio
+async def test_streaming_composer_first_token_timeout_disabled_does_not_fire() -> None:
+    """``first_token_timeout_s=None`` lets a slow stream finish
+    without tripping the deadline."""
+
+    from deskmate_agent.skills import openai_compat_streaming_composer
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        async def body():
+            # Brief sleep, then a real token. Without the deadline
+            # this should land normally.
+            await asyncio.sleep(0.05)
+            for line in (
+                b"data: " + json.dumps({"choices": [{"delta": {"content": "ok"}}]}).encode("utf-8") + b"\n",
+                b"data: [DONE]\n",
+            ):
+                yield line
+        return httpx.Response(
+            200,
+            content=body(),
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    compose = openai_compat_streaming_composer(
+        base_url="https://api.test/v1",
+        api_key="sk-test",
+        model="gpt-test",
+        client=_client(handler),
+        first_token_timeout_s=None,
+    )
+    tokens = [t async for t in compose("hi")]
+    assert tokens == ["ok"]

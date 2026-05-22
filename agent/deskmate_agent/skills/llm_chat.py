@@ -197,6 +197,7 @@ def openai_compat_streaming_composer(
     model: str,
     system_prompt: str = _DEFAULT_SYSTEM_PROMPT,
     timeout_s: float = 60.0,
+    first_token_timeout_s: float | None = 8.0,
     memory_window: int = 6,
     max_tokens: int = 200,
     client: httpx.AsyncClient | None = None,
@@ -217,6 +218,13 @@ def openai_compat_streaming_composer(
     observer measured the whole response — keep it for backwards
     compat, but treat the streaming number as the canonical one.
 
+    V10 L3-B5 · ``first_token_timeout_s`` (default ``8s``) is the
+    upper bound on time-to-first-token. When set, a model that
+    refuses to start streaming within the budget falls through to
+    the configured fallback so the user never stares at the ``"…"``
+    placeholder forever. Set to ``None`` to disable the deadline
+    (the global ``timeout_s`` still bounds the underlying request).
+
     Failure modes:
 
     - Stream open fails (DNS, TLS, 401, 5xx, network blip mid-call):
@@ -225,6 +233,7 @@ def openai_compat_streaming_composer(
       dispatcher's streaming chain still sees something to render.
     - Empty stream: yield nothing; the dispatcher leaves the
       placeholder in place per its existing contract.
+    - First-token deadline exceeded: same as stream open failure.
     """
     effective_client = client or httpx.AsyncClient(timeout=timeout_s)
     endpoint = f"{base_url.rstrip('/')}/chat/completions"
@@ -285,7 +294,18 @@ def openai_compat_streaming_composer(
                 },
             ) as resp:
                 resp.raise_for_status()
-                async for line in resp.aiter_lines():
+                line_iter = resp.aiter_lines().__aiter__()
+                while True:
+                    try:
+                        if not first_token_logged and first_token_timeout_s:
+                            line = await asyncio.wait_for(
+                                line_iter.__anext__(),
+                                timeout=first_token_timeout_s,
+                            )
+                        else:
+                            line = await line_iter.__anext__()
+                    except StopAsyncIteration:
+                        break
                     if not line:
                         continue
                     # OpenAI-compatible streaming uses SSE-style
@@ -381,6 +401,24 @@ def _extract_delta_content(chunk: dict[str, Any]) -> str | None:
     return None
 
 
+def _resolve_tiered_model(skill_mode: SkillMode) -> str:
+    """V10 L3-B3: pick the model env override for ``skill_mode``,
+    falling back to ``DESKMATE_LLM_MODEL`` when no tier-specific
+    override is configured. Always returns a non-empty string so
+    callers can plug it directly into the chat-completions request.
+    """
+    base = os.environ.get("DESKMATE_LLM_MODEL", "gpt-4o-mini").strip()
+    if skill_mode == "proactive":
+        override = os.environ.get(
+            "DESKMATE_LLM_MODEL_PROACTIVE", ""
+        ).strip()
+    else:
+        override = os.environ.get(
+            "DESKMATE_LLM_MODEL_REACTIVE", ""
+        ).strip()
+    return override or base
+
+
 def make_default_composer(
     *,
     skill_registry: SkillRegistry | None = None,
@@ -393,7 +431,14 @@ def make_default_composer(
 
     - ``DESKMATE_LLM_API_KEY`` — required for the LLM path.
     - ``DESKMATE_LLM_BASE_URL`` — default ``https://api.openai.com/v1``.
-    - ``DESKMATE_LLM_MODEL`` — default ``gpt-4o-mini``.
+    - ``DESKMATE_LLM_MODEL`` — default ``gpt-4o-mini`` (used as the
+      tiered fallback).
+    - ``DESKMATE_LLM_MODEL_REACTIVE`` — V10 L3-B3 override picked
+      when ``skill_mode == "reactive"``.
+    - ``DESKMATE_LLM_MODEL_PROACTIVE`` — V10 L3-B3 override picked
+      when ``skill_mode == "proactive"``. Lets a deployment send the
+      cheap idle-nudge path through ``gpt-4o-mini`` while keeping
+      the user-driven chat path on a larger reactive model.
 
     When ``skill_registry`` is passed the LLM path wires it through
     to :func:`openai_compat_composer`. The canned path ignores it —
@@ -411,7 +456,7 @@ def make_default_composer(
     base_url = os.environ.get(
         "DESKMATE_LLM_BASE_URL", "https://api.openai.com/v1"
     ).strip()
-    model = os.environ.get("DESKMATE_LLM_MODEL", "gpt-4o-mini").strip()
+    model = _resolve_tiered_model(skill_mode)
 
     _LOGGER.info(
         "llm_composer.activated",
@@ -454,7 +499,7 @@ def make_default_streaming_composer(
     base_url = os.environ.get(
         "DESKMATE_LLM_BASE_URL", "https://api.openai.com/v1"
     ).strip()
-    model = os.environ.get("DESKMATE_LLM_MODEL", "gpt-4o-mini").strip()
+    model = _resolve_tiered_model(skill_mode)
 
     _LOGGER.info(
         "llm_composer.streaming_activated",

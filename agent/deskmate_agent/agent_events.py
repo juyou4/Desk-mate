@@ -267,7 +267,24 @@ def _priority_for_phase(phase: SessionPhase) -> Priority:
 
 
 def _preserves_actionable_state(existing: SessionInfo, incoming_phase: SessionPhase) -> bool:
-    return incoming_phase is SessionPhase.RUNNING and existing.phase in {
+    # V10 runtime-phase-observers Property 1 / Requirement 5.4 —
+    # passive observers may not silently downgrade an actionable
+    # session by emitting any "informational" phase. The original
+    # guard only covered RUNNING; the runtime-phase-observers spec
+    # broadens this to every non-actionable, non-terminal phase a
+    # ``SessionActivityUpdated`` event can carry. Hook-driven
+    # transitions remain authoritative because hooks emit explicit
+    # ``PermissionRequested`` / ``QuestionAsked`` / ``SessionCompleted``
+    # events, which the reducer routes through dedicated branches
+    # that bypass this guard.
+    informational = {
+        SessionPhase.RUNNING,
+        SessionPhase.THINKING,
+        SessionPhase.EDITING,
+        SessionPhase.RUNNING_TOOL,
+        SessionPhase.TESTING,
+    }
+    return incoming_phase in informational and existing.phase in {
         SessionPhase.WAITING_FOR_APPROVAL,
         SessionPhase.WAITING_FOR_ANSWER,
     }

@@ -36,7 +36,7 @@ from .agent_events import (
     SessionStarted,
 )
 from .agent_phase import presentation_for_phase
-from .agent_runtime import AgentRuntimeScanner, AgentRuntimeStore
+from .agent_runtime import AgentRuntimeScanner, AgentRuntimeStore, make_default_registry
 from .approvals import Approval, ApprovalRouter, ApprovalStore, ApprovalSurfacePublisher
 from .bridge import BridgeServer
 from .character_packs import (
@@ -589,13 +589,24 @@ class App:
             _handle_hook_event,
         )
         agent_runtime_store = AgentRuntimeStore()
-        agent_runtime_scanner = AgentRuntimeScanner(
-            agent_runtime_store,
-            session_store,
-        )
+        # V10 runtime-phase-observers Requirement 4.8 — the reducer is
+        # built *before* the scanner so we can hand it (and the
+        # session store) to ``make_default_registry`` and pass the
+        # registry into the scanner constructor in a single call.
+        # The factory keeps observer-pipeline construction inside
+        # ``agent_runtime`` (not ``_build_app``) so authority over
+        # the framework stays with the runtime layer.
         agent_event_reducer = AgentEventReducer(
             session_store=session_store,
             approval_store=approval_store,
+        )
+        agent_runtime_scanner = AgentRuntimeScanner(
+            agent_runtime_store,
+            session_store,
+            registry=make_default_registry(
+                agent_event_reducer,
+                session_store,
+            ),
         )
 
         async def _handle_codex_agent_event(event) -> None:

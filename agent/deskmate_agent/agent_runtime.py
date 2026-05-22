@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import re
 import subprocess
 import time
@@ -45,8 +46,20 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlparse
+
+if TYPE_CHECKING:  # pragma: no cover — type-only imports for hints
+    # Imported lazily to avoid the runtime cycle:
+    # ``runtime_observers`` imports :class:`AgentRuntimeStatus` from
+    # this module, while this module wants to type-hint the
+    # observer-pipeline classes for ``make_default_registry`` and
+    # the scanner ctor seam (Requirement 4.8 wiring).
+    from .agent_events import AgentEventReducer
+    from .runtime_observers import (
+        FilesystemAdapter,
+        RuntimePhaseObserverRegistry,
+    )
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -120,6 +133,13 @@ class AgentRuntimeStatus(BaseModel):
     display_name: str = ""
     command: str = ""
     cwd: str | None = None
+    # V10 runtime-phase-observers Requirement 2.1 — resolved
+    # workspace root (output of :func:`detect_workspace_root` over
+    # ``cwd``). ``None`` when ``cwd`` is missing or no marker file is
+    # found in any ancestor. Surfaced on the wire so observers and
+    # the session-list title formatter share a single derivation
+    # path.
+    workspace: str | None = None
     bundle_id: str | None = None
     window_title: str | None = None
     session_id: str | None = None
@@ -147,8 +167,72 @@ class ProcessRow:
 
 
 # ---------------------------------------------------------------------------
-# Classifier
+# Workspace root detection (V10 runtime-phase-observers Requirement 1)
 # ---------------------------------------------------------------------------
+
+
+# Exhaustive marker list for V1 — Requirement 1.4. Add new entries
+# only when the absence is causing user-visible misclassifications;
+# the design deliberately keeps this small so a stray ``.git`` deep
+# inside ``node_modules`` cannot pin the workspace to the wrong root.
+_WORKSPACE_MARKERS: tuple[str, ...] = (
+    ".git",
+    "pyproject.toml",
+    "package.json",
+    "Cargo.toml",
+    "Package.swift",
+)
+
+
+def detect_workspace_root(
+    cwd: str | None,
+    *,
+    fs_exists: Callable[[str], bool] = os.path.exists,
+) -> str | None:
+    """Walk ancestors of ``cwd`` and return the deepest one carrying a
+    workspace marker, falling back to ``cwd`` itself when no ancestor
+    matches (V10 runtime-phase-observers Requirement 1.1 / 1.2).
+
+    "Deepest" means closest to ``cwd``: by walking parent-ward and
+    short-circuiting on the first match we automatically pick the
+    nearest ancestor, which keeps a monorepo's sub-project taking
+    precedence over an outer ``.git`` (Requirement 1.1).
+
+    The walk halts at the filesystem root (``parent == current``,
+    Requirement 1.6) and aborts gracefully on ``OSError`` so a
+    permission glitch on one ancestor does not crash the scanner
+    (Requirement 1.5).
+    """
+    # Requirement 1.3: ``None`` in → ``None`` out so callers can
+    # safely thread an optional ``cwd`` through without a sentinel.
+    if not cwd:
+        return None
+
+    current = os.path.normpath(cwd)
+    deepest_match: str | None = None
+    while True:
+        # Requirement 1.5: any OSError aborts the walk and falls
+        # back to whatever match we have already accepted (or ``cwd``
+        # if no match yet).
+        try:
+            for marker in _WORKSPACE_MARKERS:
+                if fs_exists(os.path.join(current, marker)):
+                    # Closest-to-cwd wins (Requirement 1.1) — short-
+                    # circuit so we never overwrite a deeper match
+                    # with a shallower one further up the tree.
+                    return current
+        except OSError:
+            return deepest_match or cwd
+        parent = os.path.dirname(current)
+        # Requirement 1.6: terminate at filesystem root so we never
+        # recurse forever on a synthetic / circular path.
+        if parent == current:
+            break
+        current = parent
+    # Requirement 1.2: nothing matched — fall back to the original
+    # ``cwd`` so downstream consumers always have *some* workspace
+    # hint when ``cwd`` is set.
+    return deepest_match or cwd
 
 
 @dataclass(frozen=True)
@@ -608,12 +692,20 @@ class AgentRuntimeScanner:
         ps_provider: PsProvider = _default_ps_provider,
         clock: Clock = _default_clock,
         poll_interval_s: float = 2.0,
+        # V10 runtime-phase-observers Requirement 4.8 — the registry
+        # is constructed alongside the scanner (typically by
+        # ``make_default_registry``) and threaded in through this
+        # optional kwarg so existing call sites that don't yet wire
+        # the framework keep working unchanged. ``None`` = no
+        # observer pipeline; ``scan_once`` short-circuits.
+        registry: RuntimePhaseObserverRegistry | None = None,
     ) -> None:
         self._store = store
         self._sessions = session_store
         self._ps_provider = ps_provider
         self._clock = clock
         self._poll = poll_interval_s
+        self._registry = registry
         self._task: asyncio.Task[None] | None = None
         self._stopping = False
 
@@ -647,6 +739,14 @@ class AgentRuntimeScanner:
                 self._upsert_session(status)
         for status in expired:
             self._remove_session(status)
+        # V10 runtime-phase-observers Requirement 4.3 — drive the
+        # observer registry off the same ``now_ms`` we already pass
+        # to ``AgentRuntimeStore.expire`` so phase derivations are
+        # tick-aligned with discovery. Guarded so call sites that
+        # opt out of the framework (no registry passed) keep their
+        # old fast path.
+        if self._registry is not None:
+            self._registry.notify(statuses, now_ms)
         return changed or bool(expired)
 
     async def _run(self) -> None:
@@ -659,10 +759,25 @@ class AgentRuntimeScanner:
         existing = self._sessions.get(sid)
         if existing is not None and _is_hook_session(existing):
             return
+        # V10 runtime-phase-observers Requirement 2.3 — when the
+        # detected workspace root has a non-empty basename, fold it
+        # into the session title so two Cursor windows on different
+        # repos don't collide as identical "Cursor" rows. We
+        # ``normpath`` first so a trailing slash doesn't strip
+        # ``basename`` to the empty string.
+        title = status.display_name or status.source.value
+        if status.workspace:
+            leaf = os.path.basename(os.path.normpath(status.workspace))
+            if leaf:
+                # Requirement 2.3 — exact format pinned by the test
+                # suite ("<source label> · <basename(workspace)>").
+                title = f"{status.display_name or status.source.value} · {leaf}"
+            # Requirement 2.5 — empty basename (e.g. workspace == "/")
+            # falls through to the bare ``display_name`` set above.
         self._sessions.upsert(
             SessionInfo(
                 session_id=sid,
-                title=status.display_name or status.source.value,
+                title=title,
                 summary=_summary_for(status),
                 state=SessionState.ACTIVE,
                 priority=status.priority,
@@ -789,6 +904,14 @@ def _build_status(
         if pattern.kind is AgentRuntimeKind.GUI_IDE
         else None
     )
+    # V10 runtime-phase-observers Requirement 2.2 — derive the
+    # workspace root from whatever ``cwd`` we managed to extract so
+    # downstream consumers (session title formatter, observers like
+    # :class:`AiderTranscriptObserver`) share a single derivation
+    # path. ``detect_workspace_root`` returns ``None`` for missing
+    # ``cwd`` and falls back to the original path when no marker is
+    # found, so the call is safe regardless of GUI/CLI kind.
+    workspace_hint = detect_workspace_root(cwd_hint)
     return AgentRuntimeStatus(
         source=pattern.source,
         kind=pattern.kind,
@@ -798,6 +921,7 @@ def _build_status(
         command=row.args,
         bundle_id=pattern.bundle_id,
         cwd=cwd_hint,
+        workspace=workspace_hint,
         phase=SessionPhase.RUNNING,
         priority=_priority_for(pattern.kind),
         last_seen_ms=now_ms,
@@ -898,6 +1022,46 @@ def _is_hook_session(session: SessionInfo) -> bool:
     return "hook_source" in extras
 
 
+# ---------------------------------------------------------------------------
+# Default registry factory (V10 Requirement 4.8)
+# ---------------------------------------------------------------------------
+
+
+def make_default_registry(
+    reducer: AgentEventReducer,
+    session_store: SessionStore,
+    *,
+    fs: FilesystemAdapter | None = None,
+) -> RuntimePhaseObserverRegistry:
+    """Build the registry the application is supposed to wire into
+    :class:`AgentRuntimeScanner`. Lives here (next to the scanner)
+    rather than in :mod:`app` so authority over the observer pipeline
+    stays with the runtime layer per Requirement 4.8 — ``App._build_app``
+    only needs to call this factory.
+
+    Imports of the observer module are deferred so the runtime layer
+    keeps its current import surface when the framework is not in
+    use (e.g. embedded test harnesses constructing a scanner without
+    a reducer).
+    """
+    # Local imports — avoid a top-level cycle with ``runtime_observers``
+    # (which imports :class:`AgentRuntimeStatus` from this module).
+    from .runtime_observers import (  # noqa: PLC0415 — V10 deferred import
+        AiderTranscriptObserver,
+        DefaultFilesystemAdapter,
+        RuntimePhaseObserverRegistry,
+    )
+    # Single observer at V1 — Aider. Follow-up specs (Gemini, Kimi,
+    # Qwen, …) extend the list here using the same protocol.
+    _fs: FilesystemAdapter = fs or DefaultFilesystemAdapter()
+    observers = [AiderTranscriptObserver(fs=_fs)]
+    return RuntimePhaseObserverRegistry(
+        observers=observers,
+        reducer=reducer,
+        session_view=session_store.get,
+    )
+
+
 def _phase_rank(phase: SessionPhase) -> int:
     return _PHASE_RANK.get(phase, 9)
 
@@ -913,6 +1077,8 @@ __all__ = [
     "AgentRuntimeStatus",
     "AgentRuntimeStore",
     "ProcessRow",
+    "detect_workspace_root",
     "discover_runtime_statuses",
+    "make_default_registry",
     "parse_ps_output",
 ]

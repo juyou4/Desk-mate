@@ -120,6 +120,11 @@ class AgentRuntimeSource(StrEnum):
     TERMINAL = "terminal"
     WARP = "warp"
 
+    # V10 kiro-task-observer Requirement 1.1 — Kiro IDE source.
+    # Appended at the end of the enum so wire-format ordering of
+    # existing values is unaffected.
+    KIRO = "kiro"
+
     UNKNOWN = "unknown"
 
 
@@ -578,6 +583,21 @@ _RUNTIME_PATTERNS: tuple[_RuntimePattern, ...] = (
         arg_needles=("warp.app",),
         bundle_id="dev.warp.Warp-Stable",
         require_all=True,
+    ),
+    # V10 kiro-task-observer Requirement 1.1-1.6 — Kiro IDE.
+    # ``Kiro.app`` ships an Electron renderer swarm; the helper
+    # needles dedupe ``Kiro Helper (Renderer)`` / ``(GPU)`` /
+    # ``crashpad_handler`` so the scanner emits exactly one KIRO
+    # row per running app instance. The row is appended at the
+    # end of the table so existing matches keep their priority.
+    _RuntimePattern(
+        source=AgentRuntimeSource.KIRO,
+        kind=AgentRuntimeKind.GUI_IDE,
+        display_name="Kiro",
+        executables=("kiro",),
+        arg_needles=("kiro.app",),
+        bundle_id="com.kiro.kiro",
+        helper_needles=("kiro helper", "(renderer)", "(gpu)", "crashpad_handler"),
     ),
 )
 
@@ -1049,12 +1069,18 @@ def make_default_registry(
     from .runtime_observers import (  # noqa: PLC0415 — V10 deferred import
         AiderTranscriptObserver,
         DefaultFilesystemAdapter,
+        KiroTaskObserver,
         RuntimePhaseObserverRegistry,
     )
-    # Single observer at V1 — Aider. Follow-up specs (Gemini, Kimi,
-    # Qwen, …) extend the list here using the same protocol.
+    # V10 kiro-task-observer Requirement 15.1 — KiroTaskObserver
+    # appended after AiderTranscriptObserver. Both observers share
+    # the same ``_fs`` instance per Requirement 15.2 so test
+    # adapters wire through to both at once.
     _fs: FilesystemAdapter = fs or DefaultFilesystemAdapter()
-    observers = [AiderTranscriptObserver(fs=_fs)]
+    observers = [
+        AiderTranscriptObserver(fs=_fs),
+        KiroTaskObserver(fs=_fs),
+    ]
     return RuntimePhaseObserverRegistry(
         observers=observers,
         reducer=reducer,

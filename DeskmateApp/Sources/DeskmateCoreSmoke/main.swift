@@ -5,6 +5,9 @@ import Darwin
 import Glibc
 #endif
 import DeskmateCore
+#if canImport(SwiftUI)
+import SwiftUI
+#endif
 
 // MARK: - Minimal test harness
 //
@@ -1208,21 +1211,22 @@ runner.test("island-sm: present from empty is slideIn") {
     var sm = IslandStateMachine()
     let e = sm.apply(.present(
         kind: .notificationCard, sessionId: "s1", activityId: nil,
-        detail: nil, priority: .p2, tsMs: 100
+        detail: nil, surfaceId: nil, priority: .p2, tsMs: 100
     ))
     try runner.expect(e.transition == .slideIn, "expected slideIn")
     try runner.expect(sm.surface.kind == .notificationCard, "surface not updated")
 }
 
 runner.test("island-sm: lower priority cannot replace higher") {
-    var sm = IslandStateMachine()
+    // Use degradation >= 4 to skip SneakPeek so we test the pure priority gate.
+    var sm = IslandStateMachine(degradationLevel: 4)
     _ = sm.apply(.present(
         kind: .notificationCard, sessionId: "s1", activityId: nil,
-        detail: nil, priority: .p1, tsMs: 100
+        detail: nil, surfaceId: nil, priority: .p1, tsMs: 100
     ))
     let e = sm.apply(.present(
         kind: .liveActivity, sessionId: nil, activityId: "act",
-        detail: nil, priority: .p3, tsMs: 200
+        detail: nil, surfaceId: nil, priority: .p3, tsMs: 200
     ))
     try runner.expect(e.transition == .none, "should reject lower priority")
     try runner.expect(sm.priority == .p1, "priority should not drop")
@@ -1232,7 +1236,7 @@ runner.test("island-sm: dismiss with matching id slides out") {
     var sm = IslandStateMachine()
     _ = sm.apply(.present(
         kind: .notificationCard, sessionId: "s1", activityId: nil,
-        detail: nil, priority: .p2, tsMs: 100
+        detail: nil, surfaceId: nil, priority: .p2, tsMs: 100
     ))
     let e = sm.apply(.dismiss(id: "s1", tsMs: 200))
     try runner.expect(e.transition == .slideOut, "expected slideOut")
@@ -1243,7 +1247,7 @@ runner.test("island-sm: auto dismiss after tick timeout") {
     var sm = IslandStateMachine(autoDismissMs: 1_000)
     _ = sm.apply(.present(
         kind: .notificationCard, sessionId: "s1", activityId: nil,
-        detail: nil, priority: .p2, tsMs: 0
+        detail: nil, surfaceId: nil, priority: .p2, tsMs: 0
     ))
     let early = sm.apply(.tick(tsMs: 500))
     try runner.expect(early.transition == .none, "early tick should not dismiss")
@@ -1252,10 +1256,11 @@ runner.test("island-sm: auto dismiss after tick timeout") {
 }
 
 runner.test("island-sm: high priority surface is pinned") {
-    var sm = IslandStateMachine(pinnedPriorityCeiling: .p1, autoDismissMs: 1_000)
+    // Use degradation >= 4 to skip SneakPeek so we test the pure pinning logic.
+    var sm = IslandStateMachine(pinnedPriorityCeiling: .p1, autoDismissMs: 1_000, degradationLevel: 4)
     _ = sm.apply(.present(
         kind: .notificationCard, sessionId: "s1", activityId: nil,
-        detail: nil, priority: .p1, tsMs: 100
+        detail: nil, surfaceId: nil, priority: .p1, tsMs: 100
     ))
     let e = sm.apply(.tick(tsMs: 10_000))
     try runner.expect(e.transition == .none, "pinned surface should not dismiss")
@@ -4604,6 +4609,35 @@ runner.test("perf binding: frame ticker stop cuts off late ticks") {
     } else {
         throw SmokeError.expectation("total_frames wasn't an int")
     }
+}
+
+// --- island-polish-enhancements smoke ---
+
+runner.test("PhaseColorTable: resolve every phase without crashing") {
+    for phase in SessionRow.Phase.allCases {
+        let triple = PhaseColorTable.resolve(phase, scheme: .dark)
+        // Verify we get a valid triple (foreground/stroke may be equal for running/unknown)
+        try runner.expect(
+            triple.foreground != triple.stroke || phase == .running || phase == .unknown,
+            "PhaseColorTable returned identical foreground/stroke for \(phase)"
+        )
+    }
+}
+
+runner.test("IslandSurfaceState: new fields decode from minimal JSON") {
+    let json = #"{"kind":"compact"}"#.data(using: .utf8)!
+    let state = try decoder.decode(IslandSurfaceState.self, from: json)
+    try runner.expect(state.surfaceId == nil, "surfaceId should default nil")
+    try runner.expect(state.progress == nil, "progress should default nil")
+    try runner.expect(state.isSneakPeek == false, "isSneakPeek should default false")
+}
+
+runner.test("TopSurfaceCustomization: new fields decode from minimal JSON") {
+    let json = #"{"spec_version":1}"#.data(using: .utf8)!
+    let custom = try decoder.decode(TopSurfaceCustomization.self, from: json)
+    try runner.expect(custom.feedback.audio == false, "feedback.audio should default false")
+    try runner.expect(custom.feedback.audioName == nil, "feedback.audioName should default nil")
+    try runner.expect(custom.preferredScreenId == nil, "preferredScreenId should default nil")
 }
 
 exit(runner.finish())

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 from dataclasses import dataclass
 
 from ..dispatcher import IntentSink
@@ -67,8 +68,8 @@ def _format_detail(
 @dataclass
 class BuildStatusSkill:
     intent_sink: IntentSink
-    success_ttl_ms: int = 5_000
-    failure_ttl_ms: int = 10_000
+    success_ttl_ms: int = 12_000
+    failure_ttl_ms: int = 18_000
 
     def __post_init__(self) -> None:
         self._current_activity_id: str | None = None
@@ -119,7 +120,20 @@ class BuildStatusSkill:
             # the island or a different build overtook this one.
             # Dropping is safer than resurrecting stale activity ids.
             return
-        pct = max(0, min(100, int(round(progress * 100))))
+        # Clamp into [0.0, 1.0] (R4.6). If the input is None, NaN, or
+        # otherwise non-numeric, omit the numeric `progress` field
+        # entirely (R4.7) — the percent suffix in `detail` falls back
+        # to 0% so we still render a reasonable string.
+        clamped: float | None
+        try:
+            raw = float(progress)
+        except (TypeError, ValueError):
+            raw = None
+        if raw is None or math.isnan(raw) or math.isinf(raw):
+            clamped = None
+        else:
+            clamped = max(0.0, min(1.0, raw))
+        pct = int(round((clamped if clamped is not None else 0.0) * 100))
         tail_parts = [f"{pct}%"]
         if message:
             tail_parts.append(message)
@@ -129,10 +143,16 @@ class BuildStatusSkill:
             branch=branch,
             tail=" · ".join(tail_parts),
         )
+        payload: dict[str, object] = {
+            "activity_id": activity_id,
+            "detail": detail,
+        }
+        if clamped is not None:
+            payload["progress"] = clamped
         await self.intent_sink(
             CompanionIntent(
                 kind=IntentKind.UPDATE_ISLAND,
-                payload={"activity_id": activity_id, "detail": detail},
+                payload=payload,
             )
         )
 

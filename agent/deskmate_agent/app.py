@@ -446,19 +446,31 @@ class App:
         )
 
         session_store = SessionStore()
-        session_router = SessionInteractionRouter(session_store)
+        session_router = SessionInteractionRouter(
+            session_store,
+            intent_sink=intent_sink,
+        )
 
         reminder_store = ReminderStore()
         reminder_scheduler = ReminderScheduler(reminder_store, intent_sink)
 
         approval_store = ApprovalStore()
-        approval_router = ApprovalRouter(approval_store)
         approval_surface = ApprovalSurfacePublisher(approval_store, intent_sink)
 
         domain_projector = DomainStateProjector(
             approval_store=approval_store,
             session_store=session_store,
             intent_sink=intent_sink,
+        )
+        # island-polish-enhancements R1: ApprovalRouter now owns the
+        # close-loop emission (dismiss_island + session phase write +
+        # projector kick), so it needs the bridge sink, the live
+        # session store, and a handle to the projector built above.
+        approval_router = ApprovalRouter(
+            approval_store,
+            intent_sink=intent_sink,
+            session_store=session_store,
+            domain_projector=domain_projector,
         )
         # Phase 9 · §4: any controller-level change shows up in the
         # next ``UPDATE_DOMAIN_STATE`` intent so Swift can apply its
@@ -579,6 +591,7 @@ class App:
                     priority=phase_ui.priority,
                     detail=phase_ui.island_detail,
                     force=phase_ui.force_notification,
+                    surface_id=f"approval:{event.approval_id}" if event.approval_id else None,
                 )
             except RuntimeError:
                 pass
@@ -870,12 +883,12 @@ class App:
         # Dispatch on kind so each router owns its verbs regardless of
         # which surface originated the action (V10 L1-F).
         if action.kind is InteractionKind.PERMISSION_RESOLVE:
-            rt.approval_router.handle(action)
+            await rt.approval_router.handle(action)
         elif action.kind in {
             InteractionKind.SESSION_JUMP,
             InteractionKind.QUESTION_ANSWER,
         }:
-            result = rt.session_router.handle(action)
+            result = await rt.session_router.handle(action)
             if action.kind is InteractionKind.SESSION_JUMP and result.handled:
                 await self._handle_session_jump_result(result)
             elif action.kind is InteractionKind.QUESTION_ANSWER and result.handled:
@@ -888,6 +901,23 @@ class App:
                 source=action.source.value,
                 surface=action.payload.get("surface"),
             )
+            # When the user dismisses a reminder/notification bubble,
+            # also tear down the corresponding island notification_card
+            # so the surface store reverts to compact (and the island
+            # width recovers from the reminder-extended state).
+            reminder_id = action.payload.get("reminder_id")
+            surface_id = action.payload.get("surface_id")
+            dismiss_id = surface_id or reminder_id
+            if dismiss_id:
+                await self._send_bridge_envelope_best_effort(
+                    BridgeEnvelope.of(
+                        EnvelopeType.INTENT,
+                        {
+                            "kind": IntentKind.DISMISS_ISLAND.value,
+                            "payload": {"id": str(dismiss_id)},
+                        },
+                    )
+                )
         else:
             # V10 L1-F catch-all: every typed kind must surface as a
             # structured log line, never get silently dropped.
@@ -969,6 +999,8 @@ class App:
                     approval_id="demo-approval",
                     prompt="Allow Deskmate to run the demo action?",
                     priority=Priority.P0,
+                    session_id=None,
+                    surface_id="approval:demo-approval",
                     created_at_ms=now_ms,
                     expires_at_ms=now_ms + 10 * 60 * 1000,
                     extras={"demo": True},
@@ -1033,6 +1065,16 @@ class App:
             rt.session_store.remove("demo-codex-session")
             with contextlib.suppress(RuntimeError):
                 await rt.build_status.on_external_dismiss()
+            # Generic dismiss to clear any stuck notification_card
+            await self._send_bridge_envelope_best_effort(
+                BridgeEnvelope.of(
+                    EnvelopeType.INTENT,
+                    {
+                        "kind": IntentKind.DISMISS_ISLAND.value,
+                        "payload": {},
+                    },
+                )
+            )
             await self._send_bridge_envelope_best_effort(
                 BridgeEnvelope.of(
                     EnvelopeType.INTENT,

@@ -794,6 +794,35 @@ class AgentRuntimeScanner:
                 title = f"{status.display_name or status.source.value} · {leaf}"
             # Requirement 2.5 — empty basename (e.g. workspace == "/")
             # falls through to the bare ``display_name`` set above.
+
+        # R11: Track first observation time for codex processes and
+        # set phase_source = "unobserved" after 30s without hook/app-server events.
+        extras: dict[str, Any] = {
+            "runtime_source": status.source.value,
+            "runtime_kind": status.kind.value,
+            "command": status.command,
+        }
+        phase_source: str | None = existing.phase_source if existing else None
+
+        if status.source == AgentRuntimeSource.CODEX:
+            if existing is None:
+                # First observation — record timestamp
+                extras["first_observed_ms"] = str(status.last_seen_ms)
+            else:
+                # Carry forward existing extras
+                prev_extras = existing.extras or {}
+                first_observed = prev_extras.get("first_observed_ms")
+                if first_observed:
+                    extras["first_observed_ms"] = first_observed
+                # Check if 30s have passed without hook/app-server events
+                # (only transition to unobserved if phase_source is still None)
+                if (
+                    phase_source is None
+                    and first_observed
+                    and status.last_seen_ms - int(first_observed) >= 30_000
+                ):
+                    phase_source = "unobserved"
+
         self._sessions.upsert(
             SessionInfo(
                 session_id=sid,
@@ -804,15 +833,12 @@ class AgentRuntimeScanner:
                 created_at_ms=existing.created_at_ms if existing else status.last_seen_ms,
                 updated_at_ms=status.last_seen_ms,
                 phase=status.phase,
+                phase_source=phase_source,
                 cwd=status.cwd,
                 source=status.source.value,
                 kind=status.kind.value,
                 process_id=status.process_id,
-                extras={
-                    "runtime_source": status.source.value,
-                    "runtime_kind": status.kind.value,
-                    "command": status.command,
-                },
+                extras=extras,
             )
         )
 
@@ -820,6 +846,13 @@ class AgentRuntimeScanner:
         sid = status.effective_session_id
         existing = self._sessions.get(sid)
         if existing is not None and not _is_hook_session(existing):
+            # R11.7: When a codex process exits while phase_source is
+            # "unobserved", clear phase_source so subscribers (e.g.
+            # IslandOverlay) observe the cleared state before removal.
+            if existing.phase_source == "unobserved":
+                self._sessions.upsert(
+                    existing.model_copy(update={"phase_source": None})
+                )
             self._sessions.remove(sid)
 
 

@@ -145,6 +145,15 @@ class IslandSurfaceState(BaseModel):
     # churning ``activity_id`` on every update. Swift's
     # :class:`IslandSurfaceState` mirrors this field verbatim.
     detail: str | None = None
+    # Island-polish-enhancements: stable surface identifier for
+    # close-loop dismiss targeting (R3).
+    surface_id: str | None = None
+    # Island-polish-enhancements: continuous progress value [0.0, 1.0]
+    # for compact-surface progress capsule (R4).
+    progress: float | None = None
+    # Island-polish-enhancements: wire flag indicating the surface is
+    # in SneakPeek intermediate state (R5). Not a new IslandSurfaceKind.
+    is_sneak_peek: bool = False
 
 
 # ---------------------------------------------------------------------------

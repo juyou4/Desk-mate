@@ -46,6 +46,7 @@ class Approval(BaseModel):
 
     session_id: str | None = None
     bubble_id: str | None = None
+    surface_id: str = ""
 
     created_at_ms: int
     expires_at_ms: int | None = None  # absolute ms; None disables the TTL

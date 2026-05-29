@@ -10,16 +10,23 @@ struct IslandOverlay: View {
 
     /// V10 island polish: asymmetric springs for the
     /// notch-surface transition, mirrored on the AppKit panel
-    /// frame in ``IslandWindowController.applyPanelFrame``. Open
-    /// snappy (response 0.42, damping 0.8 lets it overshoot
-    /// 1-2 px at the corners — boring.notch's signature look),
-    /// close deliberate (response 0.45, damping 1.0 — no bounce
-    /// so users don't perceive a "rebound" on dismiss).
+    /// frame in ``IslandWindowController.applyPanelFrame``.
+    ///
+    /// Open: snappy bouncy spring (boring.notch signature — response
+    /// 0.42, damping 0.8 lets it overshoot 1-2 px at the corners).
+    /// Close: smooth critically-damped ease (open-vibe-island style —
+    /// no bounce so users don't perceive a "rebound" on dismiss).
+    /// Pop: fast underdamped spring for sneak-peek / attention pulses.
     private static let openSpring = Animation.spring(
         response: 0.42, dampingFraction: 0.8, blendDuration: 0
     )
-    private static let closeSpring = Animation.spring(
-        response: 0.45, dampingFraction: 1.0, blendDuration: 0
+    private static let closeSpring = Animation.smooth(duration: 0.3)
+    private static let popSpring = Animation.spring(
+        response: 0.3, dampingFraction: 0.5, blendDuration: 0
+    )
+    /// Interactive spring for hover-triggered width changes (boring.notch).
+    private static let hoverSpring = Animation.interactiveSpring(
+        response: 0.38, dampingFraction: 0.8, blendDuration: 0
     )
 
     var body: some View {
@@ -31,14 +38,18 @@ struct IslandOverlay: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .ignoresSafeArea()
-        // Pick the asymmetric spring at runtime: the open path uses
-        // the snappier curve, the close path uses the slower
-        // critically-damped curve. Both run the same *physical*
-        // ``isExpanded`` change so SwiftUI can stitch them together
-        // without an extra phase variable.
+        // Pick the asymmetric animation at runtime: open uses the
+        // bouncy spring, close uses the smooth ease-out, and
+        // sneak-peek uses the fast pop spring.
         .animation(
             isExpanded ? Self.openSpring : Self.closeSpring,
             value: isExpanded
+        )
+        // SneakPeek width transition uses the pop spring for a
+        // quick attention-grabbing pulse.
+        .animation(
+            Self.popSpring,
+            value: isSneakPeek
         )
         // Compact-content visibility flips on a smaller curve — its
         // appearance is decoupled from the surface size animation,
@@ -50,7 +61,9 @@ struct IslandOverlay: View {
     private func notchSurface(availableSize: CGSize) -> some View {
         let geometry = interactionGeometry(availableSize: availableSize)
         let size = geometry.surfaceSize
-        let surfaceWidth = size.width
+        // R5.1/R5.7: During SneakPeek, widen the compact surface by 80pt
+        // to give the "peek" visual cue that something arrived.
+        let surfaceWidth = (!isExpanded && isSneakPeek) ? size.width + 80 : size.width
         let surfaceHeight = size.height
         let shape = isExpanded ? NotchShape.opened : NotchShape.closed
 
@@ -62,24 +75,21 @@ struct IslandOverlay: View {
             Group {
                 if isExpanded {
                     expandedContent
-                        // V10 island polish: expanded content slides
-                        // down + fades in from the top so it reads
-                        // as "growing out of the notch" instead of
-                        // popping in. ``move`` matches the AppKit
-                        // panel's growth direction so the rows
-                        // appear to come from inside the pill.
+                        // Inset content from the clip boundary so the
+                        // rounded corners of NotchShape don't cut into
+                        // session rows. Same approach as open-vibe-island:
+                        // content frame is narrower than the surface.
+                        .frame(width: surfaceWidth - 28)
                         .transition(.asymmetric(
                             insertion: .opacity
                                 .combined(with: .move(edge: .top))
                                 .animation(Self.openSpring),
-                            removal: .opacity.animation(.easeIn(duration: 0.14))
+                            removal: .opacity
+                                .animation(.easeIn(duration: 0.12))
                         ))
                 } else if shouldShowCompactContent {
                     compactContent
                         .frame(height: surfaceHeight, alignment: .bottom)
-                        // Compact content fades in/out without
-                        // displacement — moving it would race the
-                        // notch height transition and look jittery.
                         .transition(.opacity.animation(.easeOut(duration: 0.16)))
                 } else {
                     idleEdge
@@ -93,9 +103,15 @@ struct IslandOverlay: View {
                 .stroke(borderColor, lineWidth: isExpanded ? 0.5 : 0)
                 .frame(width: surfaceWidth, height: surfaceHeight)
         )
+        // R4: Full-width progress bar at the bottom of the pill
+        .overlay(alignment: .bottom) {
+            EmptyView() // Progress moved to trailing module
+        }
         .contentShape(shape)
         .onTapGesture {
-            runtime.handleIslandHover(.tap(tsMs: nowMs()))
+            withAnimation(Self.hoverSpring) {
+                runtime.handleIslandHover(.tap(tsMs: nowMs()))
+            }
         }
         .frame(maxWidth: .infinity, alignment: .top)
     }
@@ -108,15 +124,29 @@ struct IslandOverlay: View {
                 subtitle: compactLeadingSubtitle,
                 color: chipColor
             )
-            .frame(width: compactSideWidth, alignment: .leading)
+            .frame(width: leadingSideWidth, alignment: .leading)
 
             notchCore
                 .frame(width: closedNotchWidth, height: compactSurfaceHeight)
 
             compactTrailingModule
-                .frame(width: compactSideWidth, alignment: .trailing)
+                .frame(width: trailingSideWidth, alignment: .trailing)
         }
         .frame(height: compactSurfaceHeight)
+        // Asymmetric width animation lets the trailing module morph
+        // smoothly when build-done state arrives — the checkmark
+        // appears in a wider column than the running progress bar.
+        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: isBuildDoneState)
+    }
+
+    /// When in build-done state, give trailing a bit more room but
+    /// keep leading readable. 60/40 split instead of 50/150.
+    private var leadingSideWidth: CGFloat {
+        isBuildDoneState ? compactSideWidth * 0.75 : compactSideWidth
+    }
+
+    private var trailingSideWidth: CGFloat {
+        isBuildDoneState ? compactSideWidth * 1.25 : compactSideWidth
     }
 
     private var idleEdge: some View {
@@ -124,13 +154,13 @@ struct IslandOverlay: View {
     }
 
     private var expandedContent: some View {
-        VStack(alignment: .leading, spacing: 9) {
+        VStack(alignment: .leading, spacing: 8) {
             expandedHeader
             if visibleSessions.isEmpty {
                 emptyExpandedState
             } else {
                 ScrollView {
-                    VStack(spacing: 7) {
+                    VStack(spacing: 6) {
                         ForEach(visibleSessions, id: \.sessionId) { session in
                             sessionRow(session)
                         }
@@ -139,77 +169,98 @@ struct IslandOverlay: View {
                 .scrollIndicators(.hidden)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.top, 12)
+        .padding(.horizontal, 18)
+        .padding(.top, 8)
         .padding(.bottom, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var expandedHeader: some View {
-        HStack(alignment: .center, spacing: 10) {
-            statusDot
+        HStack(alignment: .center, spacing: 8) {
             Text(headerTitle)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.86))
-            if let source = focusSession?.sourceLabel {
-                Text(source)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.42))
-            }
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.88))
             Spacer()
             Text(clockLabel)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.white.opacity(0.58))
+                .foregroundStyle(.white.opacity(0.42))
             Button {
                 runtime.closeIslandSessionList(source: .island)
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .frame(width: 22, height: 22)
+                    .background(.white.opacity(0.08), in: Circle())
             }
             .buttonStyle(.plain)
-            .foregroundStyle(.white.opacity(0.58))
             .help("Close")
         }
+        .frame(height: closedNotchHeight)
     }
 
     private func sessionRow(_ session: SessionRow) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            phaseGlyph(for: session)
-                .frame(width: 18, height: 22)
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 7) {
+        HStack(alignment: .top, spacing: 12) {
+            // Status dot instead of large glyph — cleaner, like open-vibe-island
+            Circle()
+                .fill(phaseColor(for: session))
+                .frame(width: 8, height: 8)
+                .padding(.top, 5)
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .top, spacing: 8) {
                     Text(session.displayTitle)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.92))
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    Text(session.phaseLabel)
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(phaseColor(for: session))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(phaseColor(for: session).opacity(0.14)))
-                    Spacer(minLength: 0)
-                    Text(sessionAgeLabel(session))
-                        .font(.system(size: 9, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.35))
-                    if session.canAttemptJump {
-                        Button {
-                            runtime.jumpToSession(session.sessionId, source: .island)
-                        } label: {
-                            Image(systemName: "arrow.up.forward.app")
-                                .font(.system(size: 10, weight: .semibold))
+
+                    Spacer(minLength: 4)
+
+                    HStack(spacing: 5) {
+                        // Phase chip
+                        HStack(spacing: 2) {
+                            Text(session.phaseLabel)
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(
+                                    isUnobserved(session)
+                                        ? phaseColor(for: session).opacity(0.5)
+                                        : phaseColor(for: session)
+                                )
+                            if isUnobserved(session) {
+                                Text("?")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundStyle(phaseColor(for: session).opacity(0.5))
+                            }
                         }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.white.opacity(0.62))
-                        .help("Jump to session")
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(phaseColor(for: session).opacity(isUnobserved(session) ? 0.06 : 0.12)))
+
+                        // Age badge
+                        Text(sessionAgeLabel(session))
+                            .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.35))
+
+                        if session.canAttemptJump {
+                            Button {
+                                runtime.jumpToSession(session.sessionId, source: .island)
+                            } label: {
+                                Image(systemName: "arrow.up.forward.app")
+                                    .font(.system(size: 10, weight: .semibold))
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.white.opacity(0.5))
+                        }
                     }
                 }
+
                 Text(sessionActivityLine(session))
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.48))
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.5))
                     .lineLimit(1)
                     .truncationMode(.middle)
+
                 if let approval = approval(for: session) {
                     approvalInline(session: session, approval: approval)
                 } else if session.phase == .waitingForAnswer {
@@ -217,34 +268,51 @@ struct IslandOverlay: View {
                 }
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
         .background(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(Color.white.opacity(session.needsUserAction ? 0.075 : 0.045))
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.white.opacity(session.needsUserAction ? 0.06 : 0.03))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .strokeBorder(phaseColor(for: session).opacity(session.needsUserAction ? 0.22 : 0.08))
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(
+                    session.needsUserAction
+                        ? phaseColor(for: session).opacity(0.3)
+                        : Color.white.opacity(0.05)
+                )
         )
     }
 
     private func approvalInline(session: SessionRow, approval: ApprovalRow) -> some View {
-        HStack(spacing: 7) {
+        VStack(alignment: .leading, spacing: 8) {
             Text(approvalTitle(session: session, approval: approval))
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.white.opacity(0.72))
-                .lineLimit(1)
-                .truncationMode(.tail)
-            Spacer(minLength: 0)
-            Button("Deny") {
-                runtime.resolveApproval(id: approval.approvalId, allow: false, source: .island)
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.88))
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color(red: 0.11, green: 0.08, blue: 0.03))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(.orange.opacity(0.18))
+                )
+
+            HStack(spacing: 8) {
+                Button("Deny") {
+                    runtime.resolveApproval(id: approval.approvalId, allow: false, source: .island)
+                }
+                .buttonStyle(VibeIslandButtonStyle(kind: .secondary))
+                Button("Allow") {
+                    runtime.resolveApproval(id: approval.approvalId, allow: true, source: .island)
+                }
+                .buttonStyle(VibeIslandButtonStyle(kind: .primary))
             }
-            .buttonStyle(VibeIslandButtonStyle(kind: .secondary))
-            Button("Allow") {
-                runtime.resolveApproval(id: approval.approvalId, allow: true, source: .island)
-            }
-            .buttonStyle(VibeIslandButtonStyle(kind: .primary))
         }
     }
 
@@ -253,18 +321,17 @@ struct IslandOverlay: View {
     }
 
     private var emptyExpandedState: some View {
-        HStack(spacing: 9) {
-            Circle()
-                .fill(Color.white.opacity(0.18))
-                .frame(width: 8, height: 8)
+        VStack(spacing: 12) {
+            Spacer()
             Text("No live agent sessions")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.white.opacity(0.48))
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(.white.opacity(0.4))
+            Text("Start an agent to see activity here")
+                .font(.system(size: 12))
+                .foregroundStyle(.white.opacity(0.25))
             Spacer()
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 13)
-        .background(RoundedRectangle(cornerRadius: 7).fill(Color.white.opacity(0.04)))
+        .frame(maxWidth: .infinity)
     }
 
     private var statusDot: some View {
@@ -315,7 +382,55 @@ struct IslandOverlay: View {
 
     private var compactTrailingModule: some View {
         HStack(spacing: 6) {
-            if let notification = activeNotification {
+            if let progress = activeProgress, progress >= 0.0, progress <= 1.0 {
+                // boring.notch style: GeometryReader-based progress that
+                // fills whatever width the trailing module has available.
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(Color.white.opacity(0.12))
+                        Capsule()
+                            .fill(chipColor)
+                            .frame(width: max(0, geo.size.width * CGFloat(progress)))
+                            .shadow(color: chipColor.opacity(0.5), radius: 4, x: 2)
+                            .opacity(progress == 0 ? 0 : 1)
+                            .animation(
+                                runtime.degradationPolicy.level >= 1
+                                    ? nil
+                                    : .smooth(duration: 0.3),
+                                value: progress
+                            )
+                    }
+                }
+                .frame(height: 6)
+                .clipShape(Capsule())
+                if Int(progress * 100) > 0 {
+                    Text("\(Int(progress * 100))%")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.72))
+                        .fixedSize()
+                }
+            } else if isBuildDoneState {
+                // Completion state: checkmark + "done" in the same trailing
+                // position where the progress bar was, so it feels like a
+                // smooth morph from 100% → ✓ done.
+                HStack(spacing: 4) {
+                    Image(systemName: isBuildFailed ? "xmark.circle.fill" : "checkmark.circle.fill")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(isBuildFailed ? .red : .green)
+                        .transition(.scale.combined(with: .opacity))
+                    Text(buildDoneMessage)
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.82))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .truncationMode(.tail)
+                        .layoutPriority(1)
+                }
+                .animation(.spring(duration: 0.3), value: isBuildDoneState)
+            } else if shouldShowMultiSessionGlyphs {
+                multiSessionGlyphs
+            } else if let notification = activeNotification {
                 Image(systemName: notificationSymbol(for: notification))
                     .font(.system(size: 9, weight: .bold))
                     .foregroundStyle(Color.yellow)
@@ -344,6 +459,132 @@ struct IslandOverlay: View {
             }
         }
         .padding(.horizontal, 8)
+    }
+
+    // MARK: - Multi-Session Glyph Stack (R6)
+
+    /// Multi-session glyph stack for the trailing module (R6).
+    /// Shows overlapping circular badges for up to 3 sessions,
+    /// plus a numeric overflow indicator when there are more.
+    @ViewBuilder
+    private var multiSessionGlyphs: some View {
+        let sessions = visibleSessionsForGlyphs
+        if sessions.count >= 2 {
+            HStack(spacing: -4) {  // overlapping stack
+                ForEach(sessions.prefix(3), id: \.sessionId) { session in
+                    sessionGlyph(for: session)
+                }
+                if sessions.count > 3 {
+                    Text("+\(min(sessions.count - 3, 99))")
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.72))
+                        .padding(.leading, 4)
+                }
+            }
+            .animation(
+                .spring(duration: IslandAnimationTuning.default.multiSessionGlyphSpring),
+                value: sessions.map(\.sessionId)
+            )
+        }
+    }
+
+    /// Individual session glyph: 14pt circle with phase colour and agent icon.
+    private func sessionGlyph(for session: SessionRow) -> some View {
+        let colors = PhaseColorTable.resolve(session.phase)
+        return ZStack(alignment: .bottomTrailing) {
+            Circle()
+                .fill(colors.background)
+                .frame(width: 14, height: 14)
+                .overlay(
+                    Image(systemName: agentKindIcon(for: session))
+                        .font(.system(size: 7, weight: .bold))
+                        .foregroundStyle(colors.foreground)
+                )
+            // R6.4: status dot for waiting phases
+            if session.phase == .waitingForApproval || session.phase == .waitingForAnswer {
+                Circle()
+                    .fill(colors.stroke)
+                    .frame(width: 4, height: 4)
+                    .offset(x: 1, y: 1)
+            }
+        }
+    }
+
+    /// Map agent source to a system icon name for the glyph badge.
+    private func agentKindIcon(for session: SessionRow) -> String {
+        let source = (session.source ?? "").lowercased()
+        if source.contains("codex") { return "terminal" }
+        if source.contains("claude") { return "bubble.left" }
+        if source.contains("gemini") { return "sparkle" }
+        if source.contains("cursor") { return "cursorarrow" }
+        if source.contains("windsurf") { return "wind" }
+        if source.contains("kiro") { return "k.circle" }
+        return "questionmark.circle"
+    }
+
+    /// Active (non-closed) sessions sorted by most-recent-activity-first.
+    private var visibleSessionsForGlyphs: [SessionRow] {
+        runtime.sessions
+            .filter { $0.state != .closed }
+            .sorted { $0.updatedAtMs > $1.updatedAtMs }
+    }
+
+    /// Whether the multi-session glyph stack should be shown:
+    /// 2+ active sessions and no pending approval/notification/progress.
+    private var shouldShowMultiSessionGlyphs: Bool {
+        visibleSessionsForGlyphs.count >= 2
+            && activeProgress == nil
+            && runtime.approvals.isEmpty
+            && activeNotification == nil
+    }
+
+    /// Progress capsule for the compact trailing module (R4).
+    /// Now rendered inline in compactTrailingModule using GeometryReader.
+    /// This computed property is kept for backward compat but unused.
+    private var activeProgress: Double? {
+        runtime.island?.state.progress
+    }
+
+    /// Whether the current island surface is showing a build-done state.
+    /// We detect this by looking at the structural fields rather than
+    /// by string-matching the detail emoji prefix:
+    ///   * the surface is a build live-activity (activity id starts with
+    ///     ``build-``), and
+    ///   * there's no live progress value (``on_build_done`` deliberately
+    ///     omits the ``progress`` field, so the running capsule is gone).
+    /// A non-empty detail then means we're in the post-completion banner.
+    private var isBuildDoneState: Bool {
+        guard let state = runtime.island?.state,
+              state.kind == .liveActivity,
+              let activityId = state.activityId,
+              activityId.lowercased().hasPrefix("build-"),
+              state.progress == nil,
+              let detail = state.detail,
+              !detail.trimmingCharacters(in: .whitespaces).isEmpty
+        else { return false }
+        return detail.contains("✅") || detail.contains("❌")
+    }
+
+    private var isBuildFailed: Bool {
+        runtime.island?.state.detail?.contains("❌") == true
+    }
+
+    private var buildDoneMessage: String {
+        guard let detail = runtime.island?.state.detail else { return "done" }
+        // Find emoji boundary then return the text after the last " · "
+        // segment (that's the message slot).
+        let cleaned = detail
+            .replacingOccurrences(of: "✅", with: "")
+            .replacingOccurrences(of: "❌", with: "")
+            .trimmingCharacters(in: .whitespaces)
+        // detail format: "<task> · [<branch> ·] <message>"
+        let parts = cleaned.components(separatedBy: " · ")
+        if parts.count >= 2, let last = parts.last,
+           !last.trimmingCharacters(in: .whitespaces).isEmpty {
+            return String(last.prefix(24))
+        }
+        // No message — fall back to a generic label.
+        return isBuildFailed ? "failed" : "done"
     }
 
     private func pixelAvatar(color: Color) -> some View {
@@ -412,6 +653,15 @@ struct IslandOverlay: View {
             ?? NSScreen.main
     }
 
+    // MARK: - SneakPeek (R5)
+
+    /// Whether the island is currently in the transient SneakPeek state.
+    /// Reads from both the state machine and the surface store so the
+    /// overlay reacts regardless of which path set the flag.
+    private var isSneakPeek: Bool {
+        runtime.island?.state.isSneakPeek == true || runtime.shell.islandSurface.isSneakPeek
+    }
+
     // MARK: - Derived
 
     private var isExpanded: Bool {
@@ -476,12 +726,31 @@ struct IslandOverlay: View {
 
     private var compactLeadingSubtitle: String? {
         if runtime.bridgeState != .connected { return "offline" }
+        if isBuildDoneState {
+            // The trailing module already shows ✓/✗ + status message.
+            // Strip the redundant emoji + message from the leading subtitle
+            // so the leading column shows just the task name.
+            return buildTaskName.map { truncateForPill($0, maxChars: 14) }
+        }
         if let descriptor = activeModuleDescriptor,
            activeIslandKindRequiresCompactPresence {
             return descriptor.subtitle.map { truncateForPill($0, maxChars: 14) }
         }
         if let session = focusSession { return session.phaseLabel }
         return nil
+    }
+
+    /// Extract the task name from the build-done detail string.
+    /// Format: "✅ <task> · [<branch> ·] <message>" — return just "<task>".
+    private var buildTaskName: String? {
+        guard let detail = runtime.island?.state.detail else { return nil }
+        let cleaned = detail
+            .replacingOccurrences(of: "✅", with: "")
+            .replacingOccurrences(of: "❌", with: "")
+            .trimmingCharacters(in: .whitespaces)
+        let first = cleaned.components(separatedBy: " · ").first?
+            .trimmingCharacters(in: .whitespaces) ?? ""
+        return first.isEmpty ? nil : first
     }
 
     private var compactSourceLabel: String {
@@ -609,6 +878,12 @@ struct IslandOverlay: View {
         runtime.approvals.first { approval in
             approval.sessionId == session.sessionId
         }
+    }
+
+    /// R11.2–R11.5: Check if a session's phase is unobserved (no hook/app-server events received).
+    /// The `phase_source` field is carried through the session extras dict on the wire.
+    private func isUnobserved(_ session: SessionRow) -> Bool {
+        session.extras["phase_source"] == "unobserved"
     }
 
     private func phaseColor(for session: SessionRow) -> Color {
@@ -776,29 +1051,30 @@ private struct VibeIslandButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 11, weight: .semibold))
+            .font(.system(size: 11.5, weight: .semibold))
             .foregroundStyle(foreground)
-            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
             .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(background(configuration.isPressed))
             )
-            .opacity(configuration.isPressed ? 0.82 : 1)
     }
 
     private var foreground: Color {
         switch kind {
-        case .primary: return .black
+        case .primary: return .white
         case .secondary: return .white.opacity(0.88)
         }
     }
 
     private func background(_ pressed: Bool) -> Color {
+        let pressedFactor: Double = pressed ? 0.78 : 1.0
         switch kind {
         case .primary:
-            return Color.white.opacity(pressed ? 0.76 : 0.9)
+            return Color(red: 0.26, green: 0.45, blue: 0.86).opacity(pressedFactor)
         case .secondary:
-            return Color.white.opacity(pressed ? 0.09 : 0.14)
+            return Color.white.opacity(pressed ? 0.12 : 0.16)
         }
     }
 }

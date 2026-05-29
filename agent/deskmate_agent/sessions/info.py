@@ -98,6 +98,18 @@ class SessionInfo(BaseModel):
     parent_session_id: str | None = None
     subagent_kind: str | None = None
 
+    # Island-polish-enhancements: phase observability & question tracking.
+    # - phase_source: how the most recent phase update was sourced
+    #   ("unobserved" / "hooked" / "app_server"). None = not yet classified.
+    # - question_seq: monotonically increasing counter for questions in
+    #   this session, used to build surface_id = "question:<sid>:<seq>".
+    # - last_question_surface_id: the surface_id of the most recent
+    #   question notification_card, used by SessionInteractionRouter to
+    #   emit the correct dismiss_island target.
+    phase_source: str | None = None
+    question_seq: int = 0
+    last_question_surface_id: str | None = None
+
     # Agent/runtime discovery metadata. Hook events and passive process
     # scans both populate these so Swift can label session rows.
     source: str | None = None

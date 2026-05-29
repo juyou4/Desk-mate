@@ -33,6 +33,24 @@ public struct ScreenGeometrySpec: Codable, Sendable, Equatable {
     }
 }
 
+public struct FeedbackPrefs: Codable, Sendable, Equatable {
+    public var audio: Bool
+    public var audioName: String?
+    public init(audio: Bool = false, audioName: String? = nil) {
+        self.audio = audio
+        self.audioName = audioName
+    }
+    private enum CodingKeys: String, CodingKey {
+        case audio
+        case audioName = "audio_name"
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.audio = try c.decodeIfPresent(Bool.self, forKey: .audio) ?? false
+        self.audioName = try c.decodeIfPresent(String.self, forKey: .audioName)
+    }
+}
+
 public struct TopSurfaceCustomization: Codable, Sendable, Equatable {
     public var specVersion: Int
     public var theme: String
@@ -42,6 +60,8 @@ public struct TopSurfaceCustomization: Codable, Sendable, Equatable {
     public var hardwareNotchMode: HardwareNotchMode
     public var screenGeometries: [ScreenGeometrySpec]
     public var hoverSpeed: Double
+    public var feedback: FeedbackPrefs
+    public var preferredScreenId: String?
 
     public init(
         specVersion: Int = BridgeProtocol.specVersion,
@@ -51,7 +71,9 @@ public struct TopSurfaceCustomization: Codable, Sendable, Equatable {
         showBuddy: Bool = true,
         hardwareNotchMode: HardwareNotchMode = .automatic,
         screenGeometries: [ScreenGeometrySpec] = [],
-        hoverSpeed: Double = 1.0
+        hoverSpeed: Double = 1.0,
+        feedback: FeedbackPrefs = FeedbackPrefs(),
+        preferredScreenId: String? = nil
     ) {
         self.specVersion = specVersion
         self.theme = theme
@@ -61,6 +83,8 @@ public struct TopSurfaceCustomization: Codable, Sendable, Equatable {
         self.hardwareNotchMode = hardwareNotchMode
         self.screenGeometries = screenGeometries
         self.hoverSpeed = hoverSpeed
+        self.feedback = feedback
+        self.preferredScreenId = preferredScreenId
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -72,6 +96,8 @@ public struct TopSurfaceCustomization: Codable, Sendable, Equatable {
         case hardwareNotchMode = "hardware_notch_mode"
         case screenGeometries = "screen_geometries"
         case hoverSpeed = "hover_speed"
+        case feedback
+        case preferredScreenId = "preferred_screen_id"
     }
 
     public init(from decoder: Decoder) throws {
@@ -91,6 +117,9 @@ public struct TopSurfaceCustomization: Codable, Sendable, Equatable {
             forKey: .screenGeometries
         ) ?? []
         self.hoverSpeed = try c.decodeIfPresent(Double.self, forKey: .hoverSpeed) ?? 1.0
+        self.feedback = try c.decodeIfPresent(FeedbackPrefs.self, forKey: .feedback)
+            ?? FeedbackPrefs()
+        self.preferredScreenId = try c.decodeIfPresent(String.self, forKey: .preferredScreenId)
     }
 }
 

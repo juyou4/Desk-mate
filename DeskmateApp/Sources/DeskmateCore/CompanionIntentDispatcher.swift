@@ -235,13 +235,14 @@ extension CompanionIntentDispatcher {
         register(kind: .presentIsland) { [weak store] intent in
             guard let store else { return }
             do {
-                let (kind, sessionId, activityId, detail, priority) =
+                let (kind, sessionId, activityId, detail, surfaceId, priority) =
                     try Self.decodePresentIsland(from: intent)
                 store.present(
                     kind: kind,
                     sessionId: sessionId,
                     activityId: activityId,
                     detail: detail,
+                    surfaceId: surfaceId,
                     priority: priority
                 )
             } catch {
@@ -251,9 +252,9 @@ extension CompanionIntentDispatcher {
         register(kind: .updateIsland) { [weak store] intent in
             guard let store else { return }
             do {
-                let (activityId, detail) =
+                let (activityId, detail, progress) =
                     try Self.decodeUpdateIsland(from: intent)
-                store.update(activityId: activityId, detail: detail)
+                store.update(activityId: activityId, detail: detail, progress: progress)
             } catch {
                 onDecodeError?(error)
             }
@@ -278,6 +279,7 @@ extension CompanionIntentDispatcher {
         sessionId: String?,
         activityId: String?,
         detail: String?,
+        surfaceId: String?,
         priority: Priority
     ) {
         guard let surfaceValue = intent.payload["surface"],
@@ -304,17 +306,21 @@ extension CompanionIntentDispatcher {
         if case .string(let d) = intent.payload["detail"] ?? .null {
             detail = d
         }
+        var surfaceId: String? = nil
+        if case .string(let sid) = intent.payload["surface_id"] ?? .null {
+            surfaceId = sid
+        }
         var priority: Priority = .p2
         if case .string(let praw) = intent.payload["priority"] ?? .null,
            let p = Priority(rawValue: praw) {
             priority = p
         }
-        return (kind, sessionId, activityId, detail, priority)
+        return (kind, sessionId, activityId, detail, surfaceId, priority)
     }
 
     public static func decodeUpdateIsland(
         from intent: CompanionIntent
-    ) throws -> (activityId: String, detail: String?) {
+    ) throws -> (activityId: String, detail: String?, progress: Double?) {
         guard let raw = intent.payload["activity_id"],
               case .string(let aid) = raw,
               !aid.isEmpty
@@ -331,7 +337,13 @@ extension CompanionIntentDispatcher {
         if case .string(let d) = intent.payload["detail"] ?? .null {
             detail = d
         }
-        return (aid, detail)
+        var progress: Double? = nil
+        if case .double(let p) = intent.payload["progress"] ?? .null {
+            progress = p
+        } else if case .int(let i) = intent.payload["progress"] ?? .null {
+            progress = Double(i)
+        }
+        return (aid, detail, progress)
     }
 
     public static func decodeDismissIsland(

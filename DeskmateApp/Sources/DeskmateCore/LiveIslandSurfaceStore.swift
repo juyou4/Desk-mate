@@ -48,6 +48,47 @@ public final class LiveIslandSurfaceStore {
     public var lastTouchedMs: Int { machine.lastTouchedMs }
     public var isTransientActive: Bool { transientExpiresAtMs != nil }
     public var transientQueueCount: Int { transientQueue.count }
+    public var isSneakPeek: Bool { machine.isSneakPeek }
+
+    /// Current degradation level. Setting this updates the underlying
+    /// state machine and may collapse an active SneakPeek (R5.9).
+    public var degradationLevel: Int {
+        get { machine.degradationLevel }
+        set {
+            let now = clock()
+            let effect = machine.apply(.degradationChanged(level: newValue, tsMs: now))
+            if effect.changed {
+                let notice = ChangeEvent(
+                    state: effect.state,
+                    priority: effect.priority,
+                    transition: effect.transition
+                )
+                emit(notice)
+            }
+        }
+    }
+
+    /// R5.5: Hover during SneakPeek promotes to full notification_card.
+    /// Called by IslandWindowController when hover enters the hot rect
+    /// while a transient is active.
+    public func promoteSneakPeek() {
+        guard transientExpiresAtMs != nil else { return }
+        let now = clock()
+        // Cancel the transient timer and keep the current surface as steady
+        transientExpiresAtMs = nil
+        transientQueue.removeAll()
+        steadySurface = nil
+        // Also promote in the state machine
+        let effect = machine.promoteSneakPeek(tsMs: now)
+        if effect.changed {
+            let notice = ChangeEvent(
+                state: effect.state,
+                priority: effect.priority,
+                transition: effect.transition
+            )
+            emit(notice)
+        }
+    }
 
     public var debugSummary: String {
         let current = surfaceDebug(machine.surface)
@@ -72,6 +113,7 @@ public final class LiveIslandSurfaceStore {
         sessionId: String? = nil,
         activityId: String? = nil,
         detail: String? = nil,
+        surfaceId: String? = nil,
         priority: Priority = .p2
     ) {
         let event = IslandStateMachine.Event.present(
@@ -79,6 +121,7 @@ public final class LiveIslandSurfaceStore {
             sessionId: sessionId,
             activityId: activityId,
             detail: detail,
+            surfaceId: surfaceId,
             priority: priority,
             tsMs: clock()
         )
@@ -91,7 +134,8 @@ public final class LiveIslandSurfaceStore {
                     kind: kind,
                     sessionId: sessionId,
                     activityId: activityId,
-                    detail: detail
+                    detail: detail,
+                    surfaceId: surfaceId
                 )
                 steadyPriority = priority
                 return
@@ -103,13 +147,41 @@ public final class LiveIslandSurfaceStore {
         }
     }
 
-    public func update(activityId: String, detail: String? = nil) {
+    public func update(activityId: String, detail: String? = nil, progress: Double? = nil) {
         if transientExpiresAtMs != nil,
            steadySurface?.activityId == activityId {
             steadySurface?.detail = detail
+            steadySurface?.progress = progress
             return
         }
         apply(.update(activityId: activityId, detail: detail, tsMs: clock()))
+        // R4: update progress on the current surface. The pure reducer's
+        // update event only handles detail; progress is a surface-store
+        // concern because it arrives via the same UPDATE_ISLAND intent.
+        if machine.surface.activityId == activityId {
+            var patched = machine.surface
+            patched.progress = progress
+            if patched != machine.surface {
+                // Re-seat the machine with the patched surface so
+                // subscribers see the progress change.
+                let pinned = machine.pinnedPriorityCeiling
+                let autoDismiss = machine.autoDismissMs
+                let degradation = machine.degradationLevel
+                machine = IslandStateMachine(
+                    surface: patched,
+                    priority: machine.priority,
+                    lastTouchedMs: machine.lastTouchedMs,
+                    pinnedPriorityCeiling: pinned,
+                    autoDismissMs: autoDismiss,
+                    degradationLevel: degradation
+                )
+                emit(ChangeEvent(
+                    state: patched,
+                    priority: machine.priority,
+                    transition: .none
+                ))
+            }
+        }
     }
 
     public func dismiss(id: String? = nil) {
@@ -190,7 +262,10 @@ public final class LiveIslandSurfaceStore {
         kind: IslandSurfaceKind,
         priority: Priority
     ) -> Bool {
+        // R5.3: P0 always skips SneakPeek
         if priority == .p0 { return false }
+        // R5.6: Degradation >= 4 universally skips SneakPeek
+        if machine.degradationLevel >= 4 { return false }
         switch kind {
         case .notificationCard:
             return true
@@ -200,11 +275,8 @@ public final class LiveIslandSurfaceStore {
     }
 
     private func ttlMs(for kind: IslandSurfaceKind, priority: Priority) -> Int {
-        if priority == .p1 { return 2_800 }
-        switch kind {
-        case .notificationCard: return 2_400
-        case .compact, .empty, .liveActivity, .sessionList: return 0
-        }
+        // R5.1: 1800ms for all SneakPeek surfaces (from tuning constant)
+        return Int(IslandAnimationTuning.default.sneakPeekDuration * 1000)
     }
 
     private func presentTransient(
@@ -292,7 +364,7 @@ public final class LiveIslandSurfaceStore {
         from event: IslandStateMachine.Event,
         ttlMs: Int
     ) -> PendingTransient {
-        guard case let .present(kind, sessionId, activityId, detail, priority, _) = event
+        guard case let .present(kind, sessionId, activityId, detail, surfaceId, priority, _) = event
         else {
             preconditionFailure("transient event must be present")
         }
@@ -301,7 +373,8 @@ public final class LiveIslandSurfaceStore {
                 kind: kind,
                 sessionId: sessionId,
                 activityId: activityId,
-                detail: detail
+                detail: detail,
+                surfaceId: surfaceId
             ),
             priority: priority,
             ttlMs: ttlMs,
@@ -317,6 +390,7 @@ public final class LiveIslandSurfaceStore {
             sessionId: pending.surface.sessionId,
             activityId: pending.surface.activityId,
             detail: pending.surface.detail,
+            surfaceId: pending.surface.surfaceId,
             priority: pending.priority,
             tsMs: tsMs
         ))
@@ -348,6 +422,10 @@ public final class LiveIslandSurfaceStore {
 
     private func matches(id: String?, surface: IslandSurfaceState?) -> Bool {
         guard let id, let surface else { return false }
+        // Support surfaceId-based matching (R3.4)
+        if let surfaceId = surface.surfaceId, !surfaceId.isEmpty {
+            return id == surfaceId
+        }
         return id == surface.sessionId || id == surface.activityId
     }
 

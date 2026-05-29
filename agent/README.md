@@ -135,3 +135,54 @@ deskmate_agent/
 tests/
 └── test_*.py
 ```
+
+## Why isn't my Codex session updating?
+
+The island shows a Codex session row as soon as the agent detects the
+`codex` process, but **phase changes** (thinking → running tool → editing →
+completed) require an event source. Without one, the session stays at
+`RUNNING` with a desaturated `?` chip after ~30 seconds.
+
+Two ways to get live phase updates:
+
+### Option A: Install hooks (recommended)
+
+```bash
+deskmate hook install --source codex
+deskmate hook status --source codex   # verify: "installed"
+```
+
+This writes managed entries into `~/.codex/config.toml` and
+`~/.codex/hooks.json`. Every Codex lifecycle event (SessionStart,
+UserPromptSubmit, PreToolUse, PostToolUse, Stop) flows through the
+file queue at `~/.deskmate/hook-events/` and the island updates in
+real time.
+
+To remove:
+
+```bash
+deskmate hook uninstall --source codex
+```
+
+### Option B: Codex.app app-server
+
+If you have Codex.app installed (`/Applications/Codex.app`), the agent
+automatically connects to its local `app-server` transport on startup.
+No manual setup needed — thread/turn notifications arrive via stdio
+JSON-RPC.
+
+Disable for debugging:
+
+```bash
+DESKMATE_CODEX_APP_SERVER=0 python -m deskmate_agent
+```
+
+### Verifying
+
+After installing hooks or confirming app-server is connected, run a
+Codex task that triggers a tool call. The island should transition
+from the desaturated `RUNNING ?` chip to coloured phase labels
+(THINKING → RUNNING_TOOL → COMPLETED).
+
+If it still doesn't update, check the agent logs for
+`hooks.consume_failed` or `codex_app_server.start_failed` warnings.

@@ -135,17 +135,30 @@ public struct IslandSurfaceState: Codable, Sendable, Equatable {
     /// ``IslandSurfaceState.detail``. Omitted on the wire when nil
     /// (``encodeIfPresent``) to keep older snapshots decodeable.
     public var detail: String?
+    /// Stable surface identifier for close-loop dismiss matching (R3).
+    /// Format: `approval:<id>` or `question:<sid>:<seq>`.
+    public var surfaceId: String?
+    /// Continuous progress value in [0.0, 1.0] for compact capsule (R4).
+    public var progress: Double?
+    /// Whether this surface is in the transient SneakPeek sub-state (R5).
+    public var isSneakPeek: Bool
 
     public init(
         kind: IslandSurfaceKind = .compact,
         sessionId: String? = nil,
         activityId: String? = nil,
-        detail: String? = nil
+        detail: String? = nil,
+        surfaceId: String? = nil,
+        progress: Double? = nil,
+        isSneakPeek: Bool = false
     ) {
         self.kind = kind
         self.sessionId = sessionId
         self.activityId = activityId
         self.detail = detail
+        self.surfaceId = surfaceId
+        self.progress = progress
+        self.isSneakPeek = isSneakPeek
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -153,6 +166,9 @@ public struct IslandSurfaceState: Codable, Sendable, Equatable {
         case sessionId = "session_id"
         case activityId = "activity_id"
         case detail
+        case surfaceId = "surface_id"
+        case progress
+        case isSneakPeek = "is_sneak_peek"
     }
 
     public init(from decoder: Decoder) throws {
@@ -161,6 +177,9 @@ public struct IslandSurfaceState: Codable, Sendable, Equatable {
         self.sessionId = try c.decodeIfPresent(String.self, forKey: .sessionId)
         self.activityId = try c.decodeIfPresent(String.self, forKey: .activityId)
         self.detail = try c.decodeIfPresent(String.self, forKey: .detail)
+        self.surfaceId = try c.decodeIfPresent(String.self, forKey: .surfaceId)
+        self.progress = try c.decodeIfPresent(Double.self, forKey: .progress)
+        self.isSneakPeek = try c.decodeIfPresent(Bool.self, forKey: .isSneakPeek) ?? false
     }
 }
 

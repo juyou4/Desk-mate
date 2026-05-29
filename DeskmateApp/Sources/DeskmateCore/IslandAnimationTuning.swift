@@ -41,14 +41,32 @@ public struct IslandAnimationTuning: Equatable, Sendable {
     /// runaway value can't make the open animation feel jumpy.
     public var hoverSpeedMax: Double
 
+    /// Duration of the spring animation applied to the progress
+    /// capsule width when the reported progress value changes
+    /// between two consecutive snapshots (R4.3: 220ms ± 20ms).
+    public var progressCapsuleSpring: TimeInterval
+
+    /// Duration of the spring animation applied to multi-session
+    /// glyph entry, exit, and reordering transitions in the
+    /// trailing module (R6.3: 200ms ± 20ms).
+    public var multiSessionGlyphSpring: TimeInterval
+
+    /// How long the SneakPeek intermediate surface stays visible
+    /// before auto-dismissing back to compact, assuming no hover
+    /// event interrupts it (R5.1: 1800ms ± 100ms).
+    public var sneakPeekDuration: TimeInterval
+
     public init(
         hoverOpenBaseDelay: TimeInterval = 0.20,
         hoverCloseDelay: TimeInterval = 0.14,
         hoverOpenCancelGrace: TimeInterval = 0.10,
         panelOpenDuration: TimeInterval = 0.42,
-        panelCloseDuration: TimeInterval = 0.45,
+        panelCloseDuration: TimeInterval = 0.30,
         hoverSpeedMin: Double = 0.25,
-        hoverSpeedMax: Double = 4.0
+        hoverSpeedMax: Double = 4.0,
+        progressCapsuleSpring: TimeInterval = 0.22,
+        multiSessionGlyphSpring: TimeInterval = 0.20,
+        sneakPeekDuration: TimeInterval = 1.8
     ) {
         self.hoverOpenBaseDelay = hoverOpenBaseDelay
         self.hoverCloseDelay = hoverCloseDelay
@@ -57,6 +75,9 @@ public struct IslandAnimationTuning: Equatable, Sendable {
         self.panelCloseDuration = panelCloseDuration
         self.hoverSpeedMin = hoverSpeedMin
         self.hoverSpeedMax = hoverSpeedMax
+        self.progressCapsuleSpring = progressCapsuleSpring
+        self.multiSessionGlyphSpring = multiSessionGlyphSpring
+        self.sneakPeekDuration = sneakPeekDuration
     }
 
     /// Resolve the hover-open delay for the given user-facing

@@ -267,6 +267,89 @@ extension CompanionIntentDispatcher {
         }
     }
 
+    /// V10 island polish #10: register a handler for
+    /// ``register_module`` intents. Decodes the spec, builds a
+    /// ``RegisteredIslandModule`` and applies it via ``apply``. The
+    /// runtime owns the module registry so this isolation is purely
+    /// at the dispatcher boundary — callers pass a closure that
+    /// performs the registry mutation on the main actor.
+    public func bindModuleRegistration(
+        apply: @escaping (RegisteredIslandModule) -> Void,
+        onDecodeError: ((Error) -> Void)? = nil
+    ) {
+        register(kind: .registerModule) { intent in
+            do {
+                let spec = try Self.decodeRegisterModule(from: intent)
+                let module = RegisteredIslandModule(spec: spec)
+                apply(module)
+            } catch {
+                onDecodeError?(error)
+            }
+        }
+    }
+
+    /// Decode a ``register_module`` intent payload into a
+    /// ``IslandModuleSpec``. Required keys: ``id``, ``kind``,
+    /// ``title``. Everything else is optional.
+    public static func decodeRegisterModule(
+        from intent: CompanionIntent
+    ) throws -> IslandModuleSpec {
+        guard let idValue = intent.payload["id"],
+              case .string(let id) = idValue, !id.isEmpty
+        else {
+            throw DecodingError.typeMismatch(
+                String.self,
+                .init(codingPath: [],
+                      debugDescription: "register_module missing 'id'")
+            )
+        }
+        guard let kindValue = intent.payload["kind"],
+              case .string(let kind) = kindValue, !kind.isEmpty
+        else {
+            throw DecodingError.typeMismatch(
+                String.self,
+                .init(codingPath: [],
+                      debugDescription: "register_module missing 'kind'")
+            )
+        }
+        guard let titleValue = intent.payload["title"],
+              case .string(let title) = titleValue, !title.isEmpty
+        else {
+            throw DecodingError.typeMismatch(
+                String.self,
+                .init(codingPath: [],
+                      debugDescription: "register_module missing 'title'")
+            )
+        }
+        var priority = 50
+        if case .int(let p) = intent.payload["priority"] ?? .null {
+            priority = p
+        } else if case .double(let p) = intent.payload["priority"] ?? .null {
+            priority = Int(p)
+        }
+        var activityPrefix: String? = nil
+        if case .string(let v) = intent.payload["activity_prefix"] ?? .null {
+            activityPrefix = v
+        }
+        var subtitle: String? = nil
+        if case .string(let v) = intent.payload["subtitle"] ?? .null {
+            subtitle = v
+        }
+        var image: String? = nil
+        if case .string(let v) = intent.payload["image"] ?? .null {
+            image = v
+        }
+        return IslandModuleSpec(
+            id: id,
+            priority: priority,
+            kind: kind,
+            activityPrefix: activityPrefix,
+            title: title,
+            subtitle: subtitle,
+            image: image
+        )
+    }
+
     // MARK: - Typed payload decoders
 
     /// Decoded tuple for a ``present_island`` intent. Priority defaults

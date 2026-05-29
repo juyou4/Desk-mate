@@ -51,6 +51,21 @@ public struct FeedbackPrefs: Codable, Sendable, Equatable {
     }
 }
 
+/// V10 island polish #7: user-tunable accent color override for
+/// the progress capsule and chip color when phase is idle. ``system``
+/// defers to the macOS accent color; the named presets give users
+/// quick palette options without picking RGB themselves.
+public enum IslandAccent: String, Codable, Sendable, CaseIterable {
+    case system
+    case blue
+    case purple
+    case pink
+    case orange
+    case green
+    case mint
+    case red
+}
+
 public struct TopSurfaceCustomization: Codable, Sendable, Equatable {
     public var specVersion: Int
     public var theme: String
@@ -62,6 +77,11 @@ public struct TopSurfaceCustomization: Codable, Sendable, Equatable {
     public var hoverSpeed: Double
     public var feedback: FeedbackPrefs
     public var preferredScreenId: String?
+    /// V10 island polish #7: accent color preset for chip / progress.
+    public var accent: IslandAccent
+    /// V10 island polish #8: render the progress capsule with a
+    /// LinearGradient instead of a solid fill.
+    public var useGradientProgress: Bool
 
     public init(
         specVersion: Int = BridgeProtocol.specVersion,
@@ -73,7 +93,9 @@ public struct TopSurfaceCustomization: Codable, Sendable, Equatable {
         screenGeometries: [ScreenGeometrySpec] = [],
         hoverSpeed: Double = 1.0,
         feedback: FeedbackPrefs = FeedbackPrefs(),
-        preferredScreenId: String? = nil
+        preferredScreenId: String? = nil,
+        accent: IslandAccent = .system,
+        useGradientProgress: Bool = true
     ) {
         self.specVersion = specVersion
         self.theme = theme
@@ -85,6 +107,8 @@ public struct TopSurfaceCustomization: Codable, Sendable, Equatable {
         self.hoverSpeed = hoverSpeed
         self.feedback = feedback
         self.preferredScreenId = preferredScreenId
+        self.accent = accent
+        self.useGradientProgress = useGradientProgress
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -98,6 +122,8 @@ public struct TopSurfaceCustomization: Codable, Sendable, Equatable {
         case hoverSpeed = "hover_speed"
         case feedback
         case preferredScreenId = "preferred_screen_id"
+        case accent
+        case useGradientProgress = "use_gradient_progress"
     }
 
     public init(from decoder: Decoder) throws {
@@ -120,6 +146,10 @@ public struct TopSurfaceCustomization: Codable, Sendable, Equatable {
         self.feedback = try c.decodeIfPresent(FeedbackPrefs.self, forKey: .feedback)
             ?? FeedbackPrefs()
         self.preferredScreenId = try c.decodeIfPresent(String.self, forKey: .preferredScreenId)
+        self.accent = try c.decodeIfPresent(IslandAccent.self, forKey: .accent) ?? .system
+        self.useGradientProgress = try c.decodeIfPresent(
+            Bool.self, forKey: .useGradientProgress
+        ) ?? true
     }
 }
 

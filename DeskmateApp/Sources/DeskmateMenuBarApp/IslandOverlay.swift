@@ -6,28 +6,31 @@ import DeskmateCore
 /// actionable rows.
 struct IslandOverlay: View {
     @ObservedObject var runtime: DeskmateMenuBarRuntime
-    private let moduleRegistry = IslandModuleRegistry.deskmateDefaultModules()
+    /// V10 island polish #10: pull from the runtime registry so
+    /// externally-registered modules show up in the trailing module
+    /// without us instantiating them at view-init time.
+    private var moduleRegistry: IslandModuleRegistry {
+        runtime.islandModules
+    }
+
+    /// V10 island polish #2 (MioIsland-inspired): carousel index that
+    /// rotates the trailing module through up to 4 facts every 3
+    /// seconds when sessions are active. Reset to 0 when sessions
+    /// disappear so we don't stick on a stale slide.
+    @State private var carouselIndex: Int = 0
+    private let carouselTimer = Timer.publish(every: 3, on: .main, in: .common).autoconnect()
 
     /// V10 island polish: asymmetric springs for the
     /// notch-surface transition, mirrored on the AppKit panel
     /// frame in ``IslandWindowController.applyPanelFrame``.
-    ///
-    /// Open: snappy bouncy spring (boring.notch signature — response
-    /// 0.42, damping 0.8 lets it overshoot 1-2 px at the corners).
-    /// Close: smooth critically-damped ease (open-vibe-island style —
-    /// no bounce so users don't perceive a "rebound" on dismiss).
-    /// Pop: fast underdamped spring for sneak-peek / attention pulses.
-    private static let openSpring = Animation.spring(
-        response: 0.42, dampingFraction: 0.8, blendDuration: 0
-    )
-    private static let closeSpring = Animation.smooth(duration: 0.3)
-    private static let popSpring = Animation.spring(
-        response: 0.3, dampingFraction: 0.5, blendDuration: 0
-    )
+    /// Now just thin aliases to ``IslandAnimations`` (#6) so the
+    /// numbers live in one place and the smoke binary can lock them
+    /// without pulling in the menu-bar module.
+    private static let openSpring = IslandAnimations.open
+    private static let closeSpring = IslandAnimations.close
+    private static let popSpring = IslandAnimations.pop
     /// Interactive spring for hover-triggered width changes (boring.notch).
-    private static let hoverSpring = Animation.interactiveSpring(
-        response: 0.38, dampingFraction: 0.8, blendDuration: 0
-    )
+    private static let hoverSpring = IslandAnimations.hover
 
     var body: some View {
         GeometryReader { geometry in
@@ -56,6 +59,19 @@ struct IslandOverlay: View {
         // so a session arriving while the user is hovering doesn't
         // restart the open spring.
         .animation(.easeOut(duration: 0.18), value: shouldShowCompactContent)
+        // V10 island polish #2: advance the trailing carousel only
+        // while we have something to rotate through. The timer is
+        // autoconnected globally but the index only ticks while the
+        // carousel is visible.
+        .onReceive(carouselTimer) { _ in
+            guard carouselFactCount > 1 else {
+                if carouselIndex != 0 { carouselIndex = 0 }
+                return
+            }
+            withAnimation(.easeInOut(duration: 0.4)) {
+                carouselIndex = (carouselIndex + 1) % carouselFactCount
+            }
+        }
     }
 
     private func notchSurface(availableSize: CGSize) -> some View {
@@ -113,6 +129,22 @@ struct IslandOverlay: View {
                 runtime.handleIslandHover(.tap(tsMs: nowMs()))
             }
         }
+        // V10 island polish #5 (boring.notch-inspired): swipe down
+        // to expand, swipe up to collapse. Threshold 18pt — short
+        // enough to feel responsive but high enough to not trigger
+        // on jitter while hovering. Only active in their respective
+        // states so we don't try to expand an already-expanded notch.
+        .gesture(
+            DragGesture(minimumDistance: 18)
+                .onEnded { value in
+                    let dy = value.translation.height
+                    if dy > 18 && !isExpanded {
+                        runtime.openIslandSessionList()
+                    } else if dy < -18 && isExpanded {
+                        runtime.closeIslandSessionList(source: .island)
+                    }
+                }
+        )
         .frame(maxWidth: .infinity, alignment: .top)
     }
 
@@ -231,6 +263,13 @@ struct IslandOverlay: View {
                                 Text("?")
                                     .font(.system(size: 9, weight: .bold))
                                     .foregroundStyle(phaseColor(for: session).opacity(0.5))
+                            } else if isWorkingPhase(session.phase) {
+                                // V10 #4: pulsing ellipsis tells the
+                                // user the agent is actively progressing.
+                                AnimatedEllipsis(
+                                    color: phaseColor(for: session),
+                                    size: 9
+                                )
                             }
                         }
                         .padding(.horizontal, 6)
@@ -390,14 +429,14 @@ struct IslandOverlay: View {
                         Capsule()
                             .fill(Color.white.opacity(0.12))
                         Capsule()
-                            .fill(chipColor)
+                            .fill(progressFillStyle)
                             .frame(width: max(0, geo.size.width * CGFloat(progress)))
                             .shadow(color: chipColor.opacity(0.5), radius: 4, x: 2)
                             .opacity(progress == 0 ? 0 : 1)
                             .animation(
                                 runtime.degradationPolicy.level >= 1
                                     ? nil
-                                    : .smooth(duration: 0.3),
+                                    : IslandAnimations.progress,
                                 value: progress
                             )
                     }
@@ -445,12 +484,11 @@ struct IslandOverlay: View {
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .foregroundStyle(.white)
             } else if activeSessionCount > 0 {
-                Text("\(activeSessionCount)")
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.9))
-                Text("live")
-                    .font(.system(size: 8, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.42))
+                // V10 island polish #2: rotate facts about active
+                // sessions every 3s instead of always showing the
+                // count + "live". User can absorb richer status
+                // without expanding.
+                trailingCarousel
             } else {
                 Text(compactSourceLabel)
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
@@ -543,6 +581,64 @@ struct IslandOverlay: View {
     /// This computed property is kept for backward compat but unused.
     private var activeProgress: Double? {
         runtime.island?.state.progress
+    }
+
+    // MARK: - Trailing Carousel (#2 — MioIsland-inspired)
+
+    /// Number of carousel slides we have facts for. Returns at most
+    /// the number of sessions visible plus a count slide; capped at 4.
+    private var carouselFactCount: Int {
+        carouselFacts.count
+    }
+
+    /// Facts to rotate through. Order = display order.
+    /// Each slide has a primary text + secondary subtext.
+    private var carouselFacts: [(primary: String, secondary: String?)] {
+        guard let session = focusSession else { return [] }
+        var facts: [(String, String?)] = []
+        // Slide 1: phase + count
+        if activeSessionCount > 1 {
+            facts.append(("\(activeSessionCount)", "live"))
+        } else {
+            facts.append((session.phaseLabel.uppercased(), nil))
+        }
+        // Slide 2: age (e.g. "27s")
+        let age = sessionAgeLabel(session)
+        facts.append((age, "ago"))
+        // Slide 3: source short name (e.g. "kiro", "codex")
+        if let src = session.sourceLabel ?? session.source {
+            facts.append((sourceShortName(src).uppercased(), nil))
+        }
+        // Slide 4: pending count if any
+        let pending = runtime.approvals.count
+        if pending > 0 {
+            facts.append(("\(pending)", "pending"))
+        }
+        return Array(facts.prefix(4))
+    }
+
+    @ViewBuilder
+    private var trailingCarousel: some View {
+        let facts = carouselFacts
+        let idx = facts.isEmpty ? 0 : (carouselIndex % facts.count)
+        let fact = facts[safe: idx]
+        if let fact {
+            HStack(spacing: 4) {
+                Text(fact.primary)
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.9))
+                if let sub = fact.secondary {
+                    Text(sub)
+                        .font(.system(size: 8, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.42))
+                }
+            }
+            .id("carousel-\(idx)")
+            .transition(.asymmetric(
+                insertion: .opacity.combined(with: .move(edge: .top)),
+                removal: .opacity.combined(with: .move(edge: .bottom))
+            ))
+        }
     }
 
     /// Whether the current island surface is showing a build-done state.
@@ -693,13 +789,34 @@ struct IslandOverlay: View {
             if activeNotification != nil { return .yellow }
             if !runtime.approvals.isEmpty { return .orange }
             if let session = focusSession { return phaseColor(for: session) }
-            switch runtime.island?.state.kind {
-            case .liveActivity: return .blue
-            case .notificationCard: return .yellow
-            case .sessionList: return .purple
-            case .compact, .empty, .none: return .green
-            }
+            // V10 island polish #7: idle-state chip color defers to
+            // the user's accent preset. Active phases keep their
+            // semantic colors (orange = needs approval, blue = busy)
+            // because those carry meaning across themes.
+            return userAccentColor
         }
+    }
+
+    /// V10 #7 helper: user-tunable accent color preset, defaulting to
+    /// the system accent. Used for the idle chip color and (via
+    /// ``progressFillStyle``) the progress capsule fill.
+    private var userAccentColor: Color {
+        runtime.topSurfaceCustomization.current.accent.color
+    }
+
+    /// V10 #8: progress capsule fill — solid by default, optional
+    /// LinearGradient that fades from accent → muted accent for a
+    /// subtle highlight look (Atoll-style).
+    private var progressFillStyle: AnyShapeStyle {
+        let useGradient = runtime.topSurfaceCustomization.current.useGradientProgress
+        if useGradient {
+            return AnyShapeStyle(LinearGradient(
+                colors: [chipColor, chipColor.opacity(0.45)],
+                startPoint: .trailing,
+                endPoint: .leading
+            ))
+        }
+        return AnyShapeStyle(chipColor)
     }
 
     private var activeSessionCount: Int {
@@ -887,6 +1004,20 @@ struct IslandOverlay: View {
     }
 
     private func phaseColor(for session: SessionRow) -> Color {
+        // V10 island polish #3 (MioIsland-inspired): unattended
+        // escalation. Waiting-for-{approval,answer} phases tint
+        // orange after 30s and red after 60s so a stuck Allow / Deny
+        // visually nags the user.
+        if session.phase == .waitingForApproval
+            || session.phase == .waitingForAnswer {
+            let waitMs = max(0, nowMs() - session.updatedAtMs)
+            if waitMs > 60_000 {
+                return Color(red: 0.94, green: 0.27, blue: 0.27) // red
+            }
+            if waitMs > 30_000 {
+                return Color(red: 1.0, green: 0.6, blue: 0.2) // orange
+            }
+        }
         switch session.phase {
         case .waitingForApproval: return .orange
         case .waitingForAnswer: return .yellow
@@ -897,6 +1028,17 @@ struct IslandOverlay: View {
         case .failed: return .red
         case .completed: return .green
         case .running, .unknown: return Color(red: 0.29, green: 0.86, blue: 0.46)
+        }
+    }
+
+    /// V10 #4: phases where work is actively progressing — show
+    /// the AnimatedEllipsis to signal "still alive".
+    private func isWorkingPhase(_ phase: SessionRow.Phase) -> Bool {
+        switch phase {
+        case .running, .thinking, .editing, .runningTool, .testing:
+            return true
+        case .waitingForApproval, .waitingForAnswer, .completed, .failed, .unknown:
+            return false
         }
     }
 
@@ -1076,5 +1218,48 @@ private struct VibeIslandButtonStyle: ButtonStyle {
         case .secondary:
             return Color.white.opacity(pressed ? 0.12 : 0.16)
         }
+    }
+}
+
+private extension Collection {
+    /// Bounds-checked subscript so the carousel index can't crash when
+    /// the facts list shrinks between ticks.
+    subscript(safe index: Index) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+}
+
+/// V10 island polish #4 (MioIsland-inspired): animated ellipsis that
+/// pulses three dots in/out at staggered phase. Used as the trailing
+/// suffix for "working" phase labels (running, thinking, editing,
+/// running tool, testing) so the chip feels alive instead of static.
+struct AnimatedEllipsis: View {
+    var color: Color
+    var size: CGFloat = 9
+    @State private var phase: Double = 0
+
+    var body: some View {
+        HStack(spacing: 1.5) {
+            ForEach(0..<3, id: \.self) { i in
+                Text(".")
+                    .font(.system(size: size, weight: .bold))
+                    .foregroundStyle(color)
+                    .opacity(opacity(for: i))
+            }
+        }
+        .onAppear {
+            withAnimation(.linear(duration: 1.2).repeatForever(autoreverses: false)) {
+                phase = 3
+            }
+        }
+    }
+
+    private func opacity(for index: Int) -> Double {
+        // Each dot's opacity peaks at a different phase offset.
+        let offset = Double(index) * 0.33
+        let p = (phase - offset).truncatingRemainder(dividingBy: 1.0)
+        let normalized = p < 0 ? p + 1 : p
+        // Ease in then out — peak around 0.5.
+        return 0.3 + 0.7 * sin(normalized * .pi)
     }
 }

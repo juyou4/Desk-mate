@@ -1030,8 +1030,8 @@ runner.test("island-interaction-geo: expanded size grows with rows and caps") {
         isExpanded: true,
         activeCount: 8
     ))
-    try runner.expect(small.expandedSurfaceSize.height == 164, "one row should use minimum expanded height")
-    try runner.expect(large.expandedSurfaceSize.height == 292, "many rows should cap expanded height")
+    try runner.expect(small.expandedSurfaceSize.height == 180, "one row should use minimum expanded height")
+    try runner.expect(large.expandedSurfaceSize.height == 380, "many rows should cap expanded height")
     try runner.expect(large.surfaceRectInPanel.maxY == large.panelSize.height, "expanded surface should pin to panel top")
 }
 
@@ -1106,8 +1106,12 @@ runner.test("island-tuning: defaults match boring.notch / MioIsland conventions"
         "hover-close should be 140 ms"
     )
     try runner.expect(
-        t.panelCloseDuration > t.panelOpenDuration,
-        "close should be slower than open: open=\(t.panelOpenDuration) close=\(t.panelCloseDuration)"
+        abs(t.panelOpenDuration - 0.42) < 0.001,
+        "open duration should be 0.42s (boring.notch spring response)"
+    )
+    try runner.expect(
+        abs(t.panelCloseDuration - 0.30) < 0.001,
+        "close duration should match SwiftUI .smooth(0.3) so the AppKit panel doesn't lag the surface"
     )
 }
 

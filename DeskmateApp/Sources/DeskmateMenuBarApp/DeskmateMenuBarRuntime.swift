@@ -26,6 +26,16 @@ public final class DeskmateMenuBarRuntime: ObservableObject {
     @Published public var activeAvatarStyle: String = "pixel"
     @Published public var islandDiagnostics: String = "screen=<pending>"
     @Published public var islandSurfaceDiagnostics: String = "surface=<pending>"
+
+    /// V10 island polish #10: live mutable registry of compact
+    /// island modules. Default modules ship from
+    /// ``IslandModuleRegistry.deskmateDefaultModules``; external
+    /// agents can append additional modules via the
+    /// ``register_module`` companion intent. Re-registering an id
+    /// replaces the previous module so a hook can update its own
+    /// template at runtime without leaking duplicates.
+    @Published public var islandModules: IslandModuleRegistry =
+        IslandModuleRegistry.deskmateDefaultModules()
     /// V10 Phase 9 · §4 — derived policy mirroring Python's
     /// ``DegradationController``. Recomputed every time
     /// ``DomainState.degradationLevel`` changes, so SwiftUI views /
@@ -112,8 +122,20 @@ public final class DeskmateMenuBarRuntime: ObservableObject {
         self.activeAvatarStyle = Self.resolveActiveAvatarStyle()
         installSubscriptions()
         refreshIslandSurfaceDiagnostics()
+        installSubscriptions()
         installLifecycleObservers()
         updatePowerDegradation()
+        // V10 island polish #10: route register_module intents into
+        // our published registry. Capture self weakly so the closure
+        // doesn't keep the runtime alive.
+        shell.dispatcher.bindModuleRegistration(
+            apply: { [weak self] module in
+                DispatchQueue.main.async {
+                    self?.islandModules.register(module)
+                }
+            },
+            onDecodeError: nil
+        )
         shell.start()
         sampler.start()
         // 5 s push cadence keeps log noise low while still giving a

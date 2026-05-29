@@ -112,10 +112,13 @@ final class IslandWindowController {
         // honours this for borderless panels at ``.statusBar``
         // level.
         w.sharingType = .none
-        // ``.statusBar`` sits above menu bar items so the pill remains
-        // visible when the user pulls down the menu bar; this is the
-        // same level macOS uses for system dialogs like the volume HUD.
-        w.level = .statusBar
+        // V10 island polish #1 (MioIsland-inspired): start at the
+        // collapsed level. ``resizeForCurrentState`` will elevate to
+        // ``.popUpMenu`` whenever the island opens. Sitting at
+        // ``.mainMenu + 3`` keeps the pill above the menu bar
+        // background but below status bar items so clicks reach the
+        // system menus.
+        w.level = .mainMenu + 3
         // Float across Spaces + fullscreen apps; don't try to own any
         // Mission Control real estate.
         w.collectionBehavior = [
@@ -233,12 +236,16 @@ final class IslandWindowController {
 
         // Audio feedback (R10.2)
         let prefs = runtime.topSurfaceCustomization.current.feedback
-        if prefs.audio, let audioName = prefs.audioName, !audioName.isEmpty {
-            if let sound = NSSound(named: NSSound.Name(audioName)) {
-                sound.play()
-            }
-            // R10.6: If audioName doesn't resolve, haptic still fired above — no error surfaced
+        if prefs.audio {
+            // V10 #9: when audio is enabled, fall back to "Tink" if
+            // the user hasn't picked a specific sound. Tink is built
+            // into macOS so the lookup is guaranteed to succeed.
+            let name = prefs.audioName?.trimmingCharacters(in: .whitespaces).isEmpty == false
+                ? prefs.audioName!
+                : "Tink"
+            NSSound(named: NSSound.Name(name))?.play()
         }
+        // R10.6: If audioName doesn't resolve, haptic still fired above — no error surfaced
     }
 
     /// React to a policy change. Visible to tests so they can drive
@@ -279,6 +286,12 @@ final class IslandWindowController {
         let expanded = runtime.isIslandExpanded
         applyPanelFrame(forceExpanded: expanded, animated: true)
         w.ignoresMouseEvents = !expanded
+        // V10 island polish #1 (MioIsland-inspired): switch window
+        // level based on collapsed/opened. When collapsed we sit just
+        // above the menu bar background but BELOW menu bar items so
+        // status bar clicks reach the system. When opened we elevate
+        // above everything so buttons inside the panel are reachable.
+        w.level = expanded ? .popUpMenu : (.mainMenu + 3)
         publishDiagnostics()
     }
 
@@ -490,6 +503,7 @@ final class IslandWindowController {
         applyPanelFrame(forceExpanded: expanded, animated: false)
         host.frame = panelFrame(forceExpanded: expanded)
         w.ignoresMouseEvents = !expanded
+        w.level = expanded ? .popUpMenu : (.mainMenu + 3)
         publishDiagnostics()
     }
 

@@ -14,6 +14,8 @@ struct SettingsSheet: View {
     @State private var feedbackAudio: Bool = false
     @State private var feedbackAudioName: String = ""
     @State private var preferredScreenId: String = ""
+    @State private var accent: IslandAccent = .system
+    @State private var useGradientProgress: Bool = true
     @State private var fieldError: String? = nil
 
     // Coalesce timer
@@ -71,6 +73,24 @@ struct SettingsSheet: View {
                     }
                 }
                 .onChange(of: preferredScreenId) { _ in scheduleApply() }
+
+                // V10 polish #7: accent color preset for the chip
+                // and progress capsule.
+                Picker("Accent", selection: $accent) {
+                    Text("System").tag(IslandAccent.system)
+                    Text("Blue").tag(IslandAccent.blue)
+                    Text("Purple").tag(IslandAccent.purple)
+                    Text("Pink").tag(IslandAccent.pink)
+                    Text("Orange").tag(IslandAccent.orange)
+                    Text("Green").tag(IslandAccent.green)
+                    Text("Mint").tag(IslandAccent.mint)
+                    Text("Red").tag(IslandAccent.red)
+                }
+                .onChange(of: accent) { _ in scheduleApply() }
+
+                // V10 polish #8: gradient toggle for the progress capsule.
+                Toggle("Gradient Progress", isOn: $useGradientProgress)
+                    .onChange(of: useGradientProgress) { _ in scheduleApply() }
             }
 
             Section("Feedback") {
@@ -116,6 +136,8 @@ struct SettingsSheet: View {
         feedbackAudio = current.feedback.audio
         feedbackAudioName = current.feedback.audioName ?? ""
         preferredScreenId = current.preferredScreenId ?? ""
+        accent = current.accent
+        useGradientProgress = current.useGradientProgress
     }
 
     private func scheduleApply() {
@@ -151,6 +173,8 @@ struct SettingsSheet: View {
             audioName: feedbackAudioName.isEmpty ? nil : feedbackAudioName
         )
         updated.preferredScreenId = preferredScreenId.isEmpty ? nil : preferredScreenId
+        updated.accent = accent
+        updated.useGradientProgress = useGradientProgress
         runtime.topSurfaceCustomization.apply(updated)
     }
 

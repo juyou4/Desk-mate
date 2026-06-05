@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from pathlib import Path
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from deskmate_agent.protocol.intents import CompanionIntent, IntentKind
 from deskmate_agent.skills import BuildStatusSkill, BuildStatusWatcher
@@ -572,14 +575,6 @@ def test_cli_today_human_readable_emits_per_ide_lines(
     assert "Today: 1h 5m" in out
     assert "Zed" in out
     assert "1h 5m" in out
-
-
-# ---------------------------------------------------------------------------
-# Task 8.3: Property test for build_status progress clamping
-# ---------------------------------------------------------------------------
-
-from hypothesis import given, settings, strategies as st
-import math
 
 
 @pytest.mark.asyncio

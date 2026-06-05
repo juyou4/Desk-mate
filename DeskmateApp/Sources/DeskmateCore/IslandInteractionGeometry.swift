@@ -118,6 +118,39 @@ public struct IslandInteractionGeometry: Equatable, Sendable {
         return surfaceRectInPanel.insetBy(dx: -18, dy: -8)
     }
 
+    public static let collapsedHitBandHeight: CGFloat = 44
+
+    /// MioIsland-style pass-through band: when collapsed, only the
+    /// top strip can accept events; everything below returns nil so
+    /// regular desktop/status-bar interaction is not blocked.
+    public static func collapsedHitBandRect(
+        in bounds: CGRect,
+        height: CGFloat = collapsedHitBandHeight
+    ) -> CGRect {
+        let bandHeight = min(max(0, height), bounds.height)
+        return CGRect(
+            x: bounds.minX,
+            y: bounds.maxY - bandHeight,
+            width: bounds.width,
+            height: bandHeight
+        )
+    }
+
+    public func hitTestRectInPanel(bounds: CGRect) -> CGRect {
+        if input.isExpanded {
+            return surfaceRectInPanel.insetBy(dx: -8, dy: -8)
+        }
+        return Self.collapsedHitBandRect(in: bounds)
+    }
+
+    /// True when an expanded-panel click landed in the transparent
+    /// area around the visible island surface. Window layers use this
+    /// to close the island and re-post the click to the system so
+    /// menu bar / underlying app controls are not swallowed.
+    public func shouldPassthroughExpandedClick(localPoint: CGPoint) -> Bool {
+        input.isExpanded && !surfaceRectInPanel.contains(localPoint)
+    }
+
     public func diagnostics(screenName: String) -> String {
         let panel = panelFrame
         let surface = surfaceRectInPanel

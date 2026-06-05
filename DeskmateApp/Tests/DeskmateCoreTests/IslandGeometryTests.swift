@@ -73,4 +73,49 @@ final class IslandGeometryTests: XCTestCase {
         let tiny = CGRect(x: 0, y: 0, width: 200, height: 20)
         XCTAssertEqual(g.cornerRadius(for: tiny, progress: 0.5), 10, accuracy: 0.01)
     }
+
+    func testCollapsedHitBandUsesOnlyTopStrip() {
+        let bounds = CGRect(x: 0, y: 0, width: 548, height: 396)
+        let band = IslandInteractionGeometry.collapsedHitBandRect(in: bounds)
+        XCTAssertEqual(band.minX, bounds.minX)
+        XCTAssertEqual(band.maxY, bounds.maxY)
+        XCTAssertEqual(band.width, bounds.width)
+        XCTAssertEqual(band.height, IslandInteractionGeometry.collapsedHitBandHeight)
+        XCTAssertTrue(band.contains(CGPoint(x: bounds.midX, y: bounds.maxY - 4)))
+        XCTAssertFalse(band.contains(CGPoint(x: bounds.midX, y: bounds.minY + 20)))
+    }
+
+    func testExpandedClickPassthroughOnlyOutsideSurface() {
+        let geometry = IslandInteractionGeometry(input: IslandInteractionInput(
+            screenFrame: screen,
+            notchSize: CGSize(width: 224, height: 28),
+            hasPhysicalNotch: true,
+            hasCompactPresence: true,
+            isExpanded: true,
+            activeCount: 3
+        ))
+        XCTAssertFalse(
+            geometry.shouldPassthroughExpandedClick(localPoint: geometry.surfaceRectInPanel.center)
+        )
+        XCTAssertTrue(
+            geometry.shouldPassthroughExpandedClick(localPoint: CGPoint(x: 2, y: 2))
+        )
+    }
+
+    func testCollapsedClickNeverUsesExpandedPassthrough() {
+        let geometry = IslandInteractionGeometry(input: IslandInteractionInput(
+            screenFrame: screen,
+            notchSize: CGSize(width: 224, height: 28),
+            hasPhysicalNotch: true,
+            hasCompactPresence: true,
+            isExpanded: false
+        ))
+        XCTAssertFalse(
+            geometry.shouldPassthroughExpandedClick(localPoint: CGPoint(x: 2, y: 2))
+        )
+    }
+}
+
+private extension CGRect {
+    var center: CGPoint { CGPoint(x: midX, y: midY) }
 }

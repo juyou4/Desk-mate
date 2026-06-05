@@ -38,6 +38,7 @@ from deskmate_agent.bridge import (
 from deskmate_agent.codex_app_server import parse_codex_notification
 from deskmate_agent.hooks import normalize_hook_event, write_hook_event
 from deskmate_agent.memory import SessionMemory, SessionSummary
+from deskmate_agent.module_registrations import write_module_registration
 from deskmate_agent.protocol.actions import (
     ActionSource,
     ActionTarget,
@@ -45,6 +46,7 @@ from deskmate_agent.protocol.actions import (
     InteractionKind,
 )
 from deskmate_agent.protocol.envelope import BridgeEnvelope, EnvelopeType
+from deskmate_agent.protocol.intents import IslandModuleSpec
 from deskmate_agent.reminders import Reminder, ReminderStatus
 from deskmate_agent.sessions import SessionInfo, SessionPhase, SessionState
 
@@ -1148,6 +1150,79 @@ async def test_hook_event_phase_presentation_reaches_island(
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
+        await app.teardown()
+
+
+@pytest.mark.asyncio
+async def test_module_registration_queue_reaches_bridge_and_replays(
+    short_socket_path: Path, tmp_path: Path
+) -> None:
+    module_dir = tmp_path / "modules"
+    config = AppConfig(
+        socket_path=short_socket_path,
+        db_dir=tmp_path,
+        batch_window_s=0.01,
+        agent_runtime_scanner_enabled=False,
+        codex_app_server_enabled=False,
+        module_registrations_dir=module_dir,
+    )
+    app = App(config)
+    runtime = await app.setup()
+    reader: asyncio.StreamReader | None = None
+    writer: asyncio.StreamWriter | None = None
+    reader2: asyncio.StreamReader | None = None
+    writer2: asyncio.StreamWriter | None = None
+    spec = IslandModuleSpec(
+        id="kiro.spec",
+        kind="live_activity",
+        title="KIRO",
+        priority=80,
+        activity_prefix="kiro-spec-",
+        subtitle="{detail}",
+        image="k.circle",
+    )
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(short_socket_path))
+        await _collect(reader, 0.05)
+        write_module_registration(spec, queue_dir=module_dir)
+
+        assert await runtime.module_registration_watcher.drain_once() == 1
+        envs = await _collect(reader, 0.2)
+        register_intents = [
+            e
+            for e in envs
+            if e.type is EnvelopeType.INTENT
+            and e.payload.get("kind") == "register_module"
+        ]
+        assert len(register_intents) == 1
+        assert register_intents[0].payload["payload"] == {
+            "id": "kiro.spec",
+            "kind": "live_activity",
+            "title": "KIRO",
+            "priority": 80,
+            "activity_prefix": "kiro-spec-",
+            "subtitle": "{detail}",
+            "image": "k.circle",
+        }
+
+        writer.close()
+        await writer.wait_closed()
+        reader2, writer2 = await asyncio.open_unix_connection(str(short_socket_path))
+        replay = await _collect(reader2, 0.2)
+        replay_intents = [
+            e
+            for e in replay
+            if e.type is EnvelopeType.INTENT
+            and e.payload.get("kind") == "register_module"
+        ]
+        assert len(replay_intents) == 1
+        assert replay_intents[0].payload["payload"]["id"] == "kiro.spec"
+    finally:
+        for candidate in (writer2, writer):
+            if candidate is not None:
+                candidate.close()
+                with contextlib.suppress(Exception):
+                    await candidate.wait_closed()
         await app.teardown()
 
 

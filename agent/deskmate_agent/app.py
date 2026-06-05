@@ -67,13 +67,22 @@ from .intent_logger import IntentLogger
 from .island_notifications import IslandNotificationPublisher
 from .logging_setup import get_logger, trace_scope
 from .memory import CodingSessionStore, ProfileStore, SessionMemory
+from .module_registrations import (
+    ModuleRegistrationWatcher,
+    default_module_registrations_dir,
+)
 from .perception_deduper import PerceptionDeduper
 from .proactive import NudgeSelector, ProactiveEngine
 from .projector import DomainStateProjector
 from .projects import ProjectRegistry
 from .protocol.actions import InteractionAction, InteractionKind
 from .protocol.envelope import BridgeEnvelope, EnvelopeType
-from .protocol.intents import CompanionIntent, IntentKind
+from .protocol.intents import (
+    CompanionIntent,
+    IntentKind,
+    IslandModuleSpec,
+    register_module_intent,
+)
 from .protocol.state import BubbleKind, BubbleSpec, Priority, UserFocus
 from .reminders import Reminder, ReminderScheduler, ReminderStore
 from .sessions import (
@@ -159,6 +168,12 @@ class AppConfig:
     #: Directory queue consumed by the hook watcher. Defaults to
     #: ``$DESKMATE_HOOK_EVENTS_DIR`` or ``~/.deskmate/hook-events``.
     hook_events_dir: Path = field(default_factory=default_hook_events_dir)
+    #: Directory queue consumed by the external island module registration
+    #: watcher. Defaults to ``$DESKMATE_MODULE_REGISTRATIONS_DIR`` or
+    #: ``~/.deskmate/module-registrations``.
+    module_registrations_dir: Path = field(
+        default_factory=default_module_registrations_dir
+    )
     #: Passive IDE / agent process scanning. Production keeps this on;
     #: tests can disable it to avoid host-machine processes leaking into
     #: deterministic snapshots.
@@ -202,6 +217,7 @@ class AppRuntime:
     codex_app_server: CodexAppServerCoordinator
     claude_transcript_watcher: ClaudeTranscriptWatcher
     hook_event_watcher: HookEventWatcher
+    module_registration_watcher: ModuleRegistrationWatcher
     project_registry: ProjectRegistry
     degradation: DegradationController
     skill_registry: SkillRegistry
@@ -224,6 +240,8 @@ class App:
         self._llm_prewarm = llm_prewarm or _noop_prewarm
         self._runtime: AppRuntime | None = None
         self._bg_tasks: list[asyncio.Task[None]] = []
+        self._intent_sink: Callable[[CompanionIntent], Awaitable[None]] | None = None
+        self._registered_island_modules: dict[str, IslandModuleSpec] = {}
 
     # ------------------------------------------------------------------
     # Public lifecycle
@@ -305,6 +323,7 @@ class App:
             path=cfg.db_dir / "intents.jsonl",
             inner=_bridge_sink,
         )
+        self._intent_sink = intent_sink
 
         # Phase 13-v: 1s dwell keeps cmd-tab flicker from flashing the
         # pill; 2s grace lets brief Messages / Finder detours stay
@@ -601,6 +620,14 @@ class App:
             cfg.hook_events_dir,
             _handle_hook_event,
         )
+
+        async def _handle_module_registration(spec: IslandModuleSpec) -> None:
+            await self._handle_module_registration(spec)
+
+        module_registration_watcher = ModuleRegistrationWatcher(
+            cfg.module_registrations_dir,
+            _handle_module_registration,
+        )
         agent_runtime_store = AgentRuntimeStore()
         # V10 runtime-phase-observers Requirement 4.8 — the reducer is
         # built *before* the scanner so we can hand it (and the
@@ -679,6 +706,7 @@ class App:
             codex_app_server=codex_app_server,
             claude_transcript_watcher=claude_transcript_watcher,
             hook_event_watcher=hook_event_watcher,
+            module_registration_watcher=module_registration_watcher,
             project_registry=project_registry,
             degradation=degradation,
             skill_registry=skill_registry,
@@ -704,6 +732,7 @@ class App:
             await rt.codex_app_server.start()
         await rt.claude_transcript_watcher.start()
         await rt.hook_event_watcher.start()
+        await rt.module_registration_watcher.start()
         try:
             await rt.bridge.serve_forever()
         finally:
@@ -725,6 +754,10 @@ class App:
             await rt.hook_event_watcher.stop()
         except Exception as exc:  # noqa: BLE001
             _LOG.warning("app.hook_event_watcher_stop_failed", error=str(exc))
+        try:
+            await rt.module_registration_watcher.stop()
+        except Exception as exc:  # noqa: BLE001
+            _LOG.warning("app.module_registration_watcher_stop_failed", error=str(exc))
         try:
             await rt.agent_runtime_scanner.stop()
         except Exception as exc:  # noqa: BLE001
@@ -782,6 +815,7 @@ class App:
         )
         await rt.bridge.send(BridgeEnvelope.of(EnvelopeType.AGENT_READY))
         rt.agent_ready_sent.set()
+        await self._replay_module_registrations()
 
     async def _on_client_disconnect(self) -> None:
         rt = self._runtime
@@ -833,6 +867,44 @@ class App:
             await self._llm_prewarm()
         except Exception as exc:  # noqa: BLE001 — prewarm failure is never fatal
             _LOG.warning("app.prewarm_failed", error=str(exc))
+
+    async def _handle_module_registration(self, spec: IslandModuleSpec) -> None:
+        """Store and forward an external island module registration.
+
+        Registrations are intentionally sticky for the resident agent process:
+        if Swift disconnects and reconnects, ``_on_client_connect`` replays the
+        latest spec per id so external tools do not need to re-register.
+        """
+        self._registered_island_modules[spec.id] = spec
+        sink = self._intent_sink
+        if sink is None:
+            return
+        try:
+            await sink(register_module_intent(spec))
+        except RuntimeError:
+            return
+        except Exception as exc:  # noqa: BLE001
+            _LOG.warning(
+                "app.module_registration_forward_failed",
+                module_id=spec.id,
+                error=str(exc),
+            )
+
+    async def _replay_module_registrations(self) -> None:
+        sink = self._intent_sink
+        if sink is None or not self._registered_island_modules:
+            return
+        for spec in sorted(self._registered_island_modules.values(), key=lambda s: s.id):
+            try:
+                await sink(register_module_intent(spec))
+            except RuntimeError:
+                return
+            except Exception as exc:  # noqa: BLE001
+                _LOG.warning(
+                    "app.module_registration_replay_failed",
+                    module_id=spec.id,
+                    error=str(exc),
+                )
 
     def _handle_perf_metrics(self, payload: dict[str, Any]) -> None:
         """Log Swift-side §3.1 hard budget readings.

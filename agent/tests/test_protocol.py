@@ -22,6 +22,7 @@ from deskmate_agent.protocol import (
     IntentKind,
     InteractionAction,
     InteractionKind,
+    IslandModuleSpec,
     IslandSurfaceKind,
     IslandSurfaceState,
     NestBehaviorPolicy,
@@ -32,6 +33,7 @@ from deskmate_agent.protocol import (
     StateFrames,
     UserFocus,
     new_trace_id,
+    register_module_intent,
 )
 
 # ---------------------------------------------------------------------------
@@ -143,6 +145,32 @@ def test_companion_intent_round_trip() -> None:
     restored = CompanionIntent.model_validate_json(intent.model_dump_json())
     assert restored.kind is IntentKind.PRESENT_ISLAND
     assert restored.payload["surface"] == "notification_card"
+
+
+def test_register_module_intent_is_typed() -> None:
+    spec = IslandModuleSpec(
+        id="kiro.spec",
+        kind="live_activity",
+        activity_prefix="kiro-spec-",
+        title="KIRO",
+        subtitle="{detail}",
+        image="k.circle",
+        priority=80,
+    )
+
+    intent = register_module_intent(spec)
+    restored = CompanionIntent.model_validate_json(intent.model_dump_json())
+
+    assert restored.kind is IntentKind.REGISTER_MODULE
+    assert restored.payload == {
+        "id": "kiro.spec",
+        "kind": "live_activity",
+        "title": "KIRO",
+        "priority": 80,
+        "activity_prefix": "kiro-spec-",
+        "subtitle": "{detail}",
+        "image": "k.circle",
+    }
 
 
 # ---------------------------------------------------------------------------

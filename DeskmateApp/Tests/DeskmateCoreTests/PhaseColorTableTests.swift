@@ -31,4 +31,48 @@ final class PhaseColorTableTests: XCTestCase {
             XCTAssertNotNil(triple.stroke)
         }
     }
+
+    func testWaitingApprovalUrgencyEscalatesAtThresholds() {
+        let now = 100_000
+        XCTAssertEqual(
+            PhaseColorTable.urgency(
+                phase: .waitingForApproval,
+                createdAtMs: now - PhaseColorTable.unattendedThresholdMs + 1,
+                nowMs: now
+            ),
+            .normal
+        )
+        XCTAssertEqual(
+            PhaseColorTable.urgency(
+                phase: .waitingForApproval,
+                createdAtMs: now - PhaseColorTable.unattendedThresholdMs,
+                nowMs: now
+            ),
+            .unattended
+        )
+        XCTAssertEqual(
+            PhaseColorTable.urgency(
+                phase: .waitingForApproval,
+                createdAtMs: now - PhaseColorTable.overdueThresholdMs,
+                nowMs: now
+            ),
+            .overdue
+        )
+    }
+
+    func testNonWaitingPhasesDoNotEscalate() {
+        let now = 100_000
+        for phase in SessionRow.Phase.allCases where
+            phase != .waitingForApproval && phase != .waitingForAnswer {
+            XCTAssertEqual(
+                PhaseColorTable.urgency(
+                    phase: phase,
+                    createdAtMs: now - PhaseColorTable.overdueThresholdMs * 2,
+                    nowMs: now
+                ),
+                .normal,
+                "\(phase) should not escalate"
+            )
+        }
+    }
 }

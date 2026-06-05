@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from deskmate_agent.approvals import (
     Approval,
@@ -18,7 +20,8 @@ from deskmate_agent.protocol.actions import (
     InteractionAction,
     InteractionKind,
 )
-from deskmate_agent.sessions import SessionStore
+from deskmate_agent.protocol.intents import IntentKind
+from deskmate_agent.sessions import SessionInfo, SessionPhase, SessionStore
 
 
 def _approval(store: ApprovalStore, aid: str = "a1") -> None:
@@ -164,13 +167,6 @@ async def test_wrong_kind_is_not_handled() -> None:
     assert result.effect == "unknown_kind"
 
 
-# ---------------------------------------------------------------------------
-# Task 3.3: Property test for ApprovalRouter resolve invariant
-# ---------------------------------------------------------------------------
-
-from hypothesis import given, settings, strategies as st
-
-
 @pytest.mark.asyncio
 @settings(max_examples=50)
 @given(
@@ -207,14 +203,6 @@ async def test_resolve_unknown_id_emits_no_intents(approval_id):
     await router.handle(action)
     assert len(emitted) == 0
     assert store.get(approval_id) is None
-
-
-# ---------------------------------------------------------------------------
-# Task 3.4: Unit tests for ApprovalRouter resolve paths
-# ---------------------------------------------------------------------------
-
-from deskmate_agent.protocol.intents import IntentKind
-from deskmate_agent.sessions import SessionInfo, SessionPhase
 
 
 @pytest.mark.asyncio

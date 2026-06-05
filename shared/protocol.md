@@ -139,6 +139,7 @@
   - `present_island` → `{ "surface": "<IslandSurfaceKind>", "session_id"?: "...", "activity_id"?: "..." }`
   - `update_island` → `{ "id": "...", "progress"?: 0.8, "title"?: "..." }`
   - `dismiss_island` → `{ "id": "..." }`
+  - `register_module` → `{ "id": "...", "kind": "live_activity", "title": "...", "priority"?: 50, "activity_prefix"?: "...", "subtitle"?: "{detail}", "image"?: "k.circle" }`
 
 ### 5.1 `IslandSurfaceKind`（V10 L1-E / I5）
 
@@ -237,6 +238,24 @@ Codex 安装器管理 `~/.codex/config.toml` 的 `[features].codex_hooks = true`
 `~/.codex/hooks.json` 中带 `Managed by Deskmate` 标记的 hook 条目。Claude 管理
 `~/.claude/settings.json`，Cursor 管理 `~/.cursor/hooks.json`。卸载只移除
 Deskmate 管理的条目，保留用户自定义 hooks。
+
+---
+
+## 6b.1 外部 Island Module 注册队列
+
+外部 agent 也不直接连接 Swift IPC socket。需要声明自己的岛展示模块时，写入模块注册文件队列：
+
+```bash
+deskmate island module register kiro.spec \
+  --kind live_activity \
+  --title KIRO \
+  --activity-prefix kiro-spec- \
+  --subtitle '{detail}' \
+  --image k.circle \
+  --priority 80
+```
+
+默认队列目录为 `~/.deskmate/module-registrations/`，可用 `DESKMATE_MODULE_REGISTRATIONS_DIR` 覆盖。常驻 Python agent 消费后发送 typed `register_module` intent；同一个 `id` 的最新 spec 会在 Swift 重连时重放，避免 UI 断线后丢失外部模块。
 
 ---
 

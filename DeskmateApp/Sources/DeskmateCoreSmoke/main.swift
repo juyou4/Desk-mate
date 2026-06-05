@@ -1417,6 +1417,53 @@ runner.test("registry: default modules render compact island states") {
     try runner.expect(idle?.title == "DM", "idle module title mismatch")
 }
 
+runner.test("registry: registered module claims prefix and renders templates") {
+    let module = RegisteredIslandModule(spec: IslandModuleSpec(
+        id: "kiro.spec",
+        priority: 80,
+        kind: "live_activity",
+        activityPrefix: "kiro-spec-",
+        title: "KIRO",
+        subtitle: "{detail}",
+        image: "k.circle"
+    ))
+    let match = IslandSurfaceState(
+        kind: .liveActivity,
+        activityId: "kiro-spec-plan",
+        detail: "Planning"
+    )
+    let miss = IslandSurfaceState(
+        kind: .liveActivity,
+        activityId: "build-demo",
+        detail: "Build"
+    )
+    try runner.expect(module.claims(state: match), "module should claim matching prefix")
+    try runner.expect(!module.claims(state: miss), "module should reject non-matching prefix")
+    let descriptor = module.render(state: match)
+    try runner.expect(descriptor?.title == "KIRO", "registered title mismatch")
+    try runner.expect(descriptor?.subtitle == "Planning", "registered subtitle mismatch")
+    try runner.expect(descriptor?.systemImageName == "k.circle", "registered icon mismatch")
+}
+
+runner.test("registry: registered module can override default live activity") {
+    var registry = IslandModuleRegistry.deskmateDefaultModules()
+    registry.register(RegisteredIslandModule(spec: IslandModuleSpec(
+        id: "kiro.spec",
+        priority: 90,
+        kind: "live_activity",
+        activityPrefix: "kiro-spec-",
+        title: "KIRO",
+        subtitle: "{activity}"
+    )))
+    let descriptor = registry.renderDescriptor(for: IslandSurfaceState(
+        kind: .liveActivity,
+        activityId: "kiro-spec-plan",
+        detail: "Planning"
+    ))
+    try runner.expect(descriptor?.title == "KIRO", "registered module should win")
+    try runner.expect(descriptor?.subtitle == "kiro-spec-plan", "activity template mismatch")
+}
+
 runner.test("registry: dispatch stops at first handler and higher priority wins") {
     var r = IslandModuleRegistry()
     let high = SmokeStubModule(id: "high", claimPriority: 10, shouldHandle: true)
@@ -1789,6 +1836,58 @@ runner.test("adapter: displayWithFold preserves actionable-first ordering of par
     )
 }
 
+runner.test("island content projection: approval wins over build and sessions") {
+    let content = IslandContentProjection.compute(
+        islandState: IslandSurfaceState(
+            kind: .liveActivity,
+            activityId: "build-demo",
+            detail: "Running tests"
+        ),
+        sessions: [smokeSessionRow("s1", phase: .running)],
+        approvals: [ApprovalRow(approvalId: "a1", sessionId: "s1")]
+    )
+    guard case .approval(let session, let approval) = content else {
+        throw SmokeError.expectation("expected approval content, got \(content)")
+    }
+    try runner.expect(session?.sessionId == "s1", "approval session mismatch")
+    try runner.expect(approval.approvalId == "a1", "approval row mismatch")
+}
+
+runner.test("island content projection: build wins over notification") {
+    let content = IslandContentProjection.compute(
+        islandState: IslandSurfaceState(
+            kind: .liveActivity,
+            activityId: "build-demo",
+            detail: "✅ Demo · done",
+            progress: 1.0
+        ),
+        sessions: [smokeSessionRow("s1")],
+        approvals: []
+    )
+    guard case .build(let activityId, _, let progress, let isDone, let isFailed) = content else {
+        throw SmokeError.expectation("expected build content, got \(content)")
+    }
+    try runner.expect(activityId == "build-demo", "build id mismatch")
+    try runner.expect(progress == 1.0, "build progress mismatch")
+    try runner.expect(isDone && !isFailed, "build completion flags mismatch")
+}
+
+runner.test("island content projection: multi-session focuses actionable") {
+    let content = IslandContentProjection.compute(
+        islandState: nil,
+        sessions: [
+            smokeSessionRow("running", phase: .running),
+            smokeSessionRow("answer", phase: .waitingForAnswer),
+        ],
+        approvals: []
+    )
+    guard case .multiSession(let sessions, let focus) = content else {
+        throw SmokeError.expectation("expected multiSession content, got \(content)")
+    }
+    try runner.expect(sessions.map(\.sessionId) == ["running", "answer"], "session order changed")
+    try runner.expect(focus?.sessionId == "answer", "focus should choose actionable")
+}
+
 // --- Phase 5: ReminderRow + ReminderListAdapter (L2-#4) ---------------------
 
 func smokeReminder(
@@ -1935,6 +2034,7 @@ runner.test("intent-kind: known kinds still decode exactly") {
         ("update_island", .updateIsland),
         ("dismiss_island", .dismissIsland),
         ("update_domain_state", .updateDomainState),
+        ("register_module", .registerModule),
     ]
     for (raw, expected) in pairs {
         let data = "{\"kind\":\"\(raw)\"}".data(using: .utf8)!
@@ -1954,6 +2054,56 @@ runner.test("intent-kind: dismiss_pet_bubble payload carries bubble_id") {
         return
     }
     try runner.expect(bid == "approval-a1", "bubble_id mismatch: \(bid)")
+}
+
+runner.test("dispatcher: decodeRegisterModule parses module spec") {
+    let intent = CompanionIntent(
+        kind: .registerModule,
+        payload: [
+            "id": .string("kiro.spec"),
+            "kind": .string("live_activity"),
+            "activity_prefix": .string("kiro-spec-"),
+            "title": .string("KIRO"),
+            "subtitle": .string("{detail}"),
+            "image": .string("k.circle"),
+            "priority": .int(80),
+        ]
+    )
+    let spec = try CompanionIntentDispatcher.decodeRegisterModule(from: intent)
+    try runner.expect(spec.id == "kiro.spec", "id mismatch")
+    try runner.expect(spec.kind == "live_activity", "kind mismatch")
+    try runner.expect(spec.activityPrefix == "kiro-spec-", "activity prefix mismatch")
+    try runner.expect(spec.title == "KIRO", "title mismatch")
+    try runner.expect(spec.subtitle == "{detail}", "subtitle mismatch")
+    try runner.expect(spec.image == "k.circle", "image mismatch")
+    try runner.expect(spec.priority == 80, "priority mismatch")
+}
+
+runner.test("dispatcher: bindModuleRegistration applies decoded module") {
+    let dispatcher = CompanionIntentDispatcher()
+    var captured: RegisteredIslandModule?
+    dispatcher.bindModuleRegistration { module in
+        captured = module
+    }
+    let intent = CompanionIntent(
+        kind: .registerModule,
+        payload: [
+            "id": .string("kiro.spec"),
+            "kind": .string("live_activity"),
+            "activity_prefix": .string("kiro-spec-"),
+            "title": .string("KIRO"),
+        ]
+    )
+    let result = dispatcher.dispatch(intent)
+    try runner.expect(result == .handled(.registerModule), "register_module should be handled")
+    try runner.expect(captured?.id == "kiro.spec", "captured module mismatch")
+    try runner.expect(
+        captured?.claims(state: IslandSurfaceState(
+            kind: .liveActivity,
+            activityId: "kiro-spec-plan"
+        )) == true,
+        "captured module should claim matching activity"
+    )
 }
 
 // --- Phase 7b: LiveDomainStateStore + CompanionIntentDispatcher -------------
@@ -4626,6 +4776,95 @@ runner.test("PhaseColorTable: resolve every phase without crashing") {
             "PhaseColorTable returned identical foreground/stroke for \(phase)"
         )
     }
+}
+
+runner.test("PhaseColorTable: waiting urgency escalates at 30s and 60s") {
+    let now = 100_000
+    try runner.expect(
+        PhaseColorTable.urgency(
+            phase: .waitingForApproval,
+            createdAtMs: now - PhaseColorTable.unattendedThresholdMs + 1,
+            nowMs: now
+        ) == .normal,
+        "approval should be normal just before unattended threshold"
+    )
+    try runner.expect(
+        PhaseColorTable.urgency(
+            phase: .waitingForApproval,
+            createdAtMs: now - PhaseColorTable.unattendedThresholdMs,
+            nowMs: now
+        ) == .unattended,
+        "approval should become unattended at threshold"
+    )
+    try runner.expect(
+        PhaseColorTable.urgency(
+            phase: .waitingForAnswer,
+            createdAtMs: now - PhaseColorTable.overdueThresholdMs,
+            nowMs: now
+        ) == .overdue,
+        "question should become overdue at threshold"
+    )
+    try runner.expect(
+        PhaseColorTable.urgency(
+            phase: .runningTool,
+            createdAtMs: now - PhaseColorTable.overdueThresholdMs * 2,
+            nowMs: now
+        ) == .normal,
+        "non-waiting phase should not escalate"
+    )
+}
+
+runner.test("IslandInteractionGeometry: collapsed hit band only covers top strip") {
+    let bounds = CGRect(x: 0, y: 0, width: 548, height: 396)
+    let band = IslandInteractionGeometry.collapsedHitBandRect(in: bounds)
+    try runner.expect(band.minX == bounds.minX, "hit band minX mismatch")
+    try runner.expect(band.maxY == bounds.maxY, "hit band should be pinned to top")
+    try runner.expect(
+        band.height == IslandInteractionGeometry.collapsedHitBandHeight,
+        "hit band height mismatch"
+    )
+    try runner.expect(
+        band.contains(CGPoint(x: bounds.midX, y: bounds.maxY - 4)),
+        "top point should hit"
+    )
+    try runner.expect(
+        !band.contains(CGPoint(x: bounds.midX, y: bounds.minY + 20)),
+        "lower transparent area should pass through"
+    )
+}
+
+runner.test("IslandInteractionGeometry: expanded passthrough only outside surface") {
+    let geometry = IslandInteractionGeometry(input: IslandInteractionInput(
+        screenFrame: CGRect(x: 0, y: 0, width: 1512, height: 982),
+        notchSize: CGSize(width: 224, height: 28),
+        hasPhysicalNotch: true,
+        hasCompactPresence: true,
+        isExpanded: true,
+        activeCount: 3
+    ))
+    let inside = CGPoint(
+        x: geometry.surfaceRectInPanel.midX,
+        y: geometry.surfaceRectInPanel.midY
+    )
+    try runner.expect(
+        !geometry.shouldPassthroughExpandedClick(localPoint: inside),
+        "surface click should stay inside island"
+    )
+    try runner.expect(
+        geometry.shouldPassthroughExpandedClick(localPoint: CGPoint(x: 2, y: 2)),
+        "transparent expanded panel click should passthrough"
+    )
+    let collapsed = IslandInteractionGeometry(input: IslandInteractionInput(
+        screenFrame: CGRect(x: 0, y: 0, width: 1512, height: 982),
+        notchSize: CGSize(width: 224, height: 28),
+        hasPhysicalNotch: true,
+        hasCompactPresence: true,
+        isExpanded: false
+    ))
+    try runner.expect(
+        !collapsed.shouldPassthroughExpandedClick(localPoint: CGPoint(x: 2, y: 2)),
+        "collapsed clicks should not use expanded passthrough path"
+    )
 }
 
 runner.test("IslandSurfaceState: new fields decode from minimal JSON") {

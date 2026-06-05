@@ -51,7 +51,7 @@ class ApprovalRouter:
         *,
         intent_sink: IntentSink,
         session_store: SessionStore,
-        domain_projector: "DomainStateProjector",
+        domain_projector: DomainStateProjector,
         clock: Callable[[], int] = _default_clock,
     ) -> None:
         self._store = store

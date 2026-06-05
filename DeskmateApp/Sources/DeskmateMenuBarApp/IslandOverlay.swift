@@ -6,6 +6,11 @@ import DeskmateCore
 /// actionable rows.
 struct IslandOverlay: View {
     @ObservedObject var runtime: DeskmateMenuBarRuntime
+    /// V11 architecture polish: dedicated ViewModel that collapses
+    /// runtime's 6+ @Published fields into a closed `IslandContent`
+    /// enum + `IslandStatus`. We migrate code paths to read from
+    /// viewModel incrementally; the rest still observes runtime.
+    @ObservedObject var viewModel: IslandViewModel
     /// V10 island polish #10: pull from the runtime registry so
     /// externally-registered modules show up in the trailing module
     /// without us instantiating them at view-init time.
@@ -18,7 +23,9 @@ struct IslandOverlay: View {
     /// seconds when sessions are active. Reset to 0 when sessions
     /// disappear so we don't stick on a stale slide.
     @State private var carouselIndex: Int = 0
+    @State private var pulsePhase: Bool = false
     private let carouselTimer = Timer.publish(every: 3, on: .main, in: .common).autoconnect()
+    private let pulseTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     /// V10 island polish: asymmetric springs for the
     /// notch-surface transition, mirrored on the AppKit panel
@@ -70,6 +77,15 @@ struct IslandOverlay: View {
             }
             withAnimation(.easeInOut(duration: 0.4)) {
                 carouselIndex = (carouselIndex + 1) % carouselFactCount
+            }
+        }
+        .onReceive(pulseTimer) { _ in
+            guard shouldPulseStatusDot else {
+                if pulsePhase { pulsePhase = false }
+                return
+            }
+            withAnimation(.easeInOut(duration: 0.9)) {
+                pulsePhase.toggle()
             }
         }
     }
@@ -125,8 +141,12 @@ struct IslandOverlay: View {
         }
         .contentShape(shape)
         .onTapGesture {
+            // V11 architecture: route through viewModel action verbs
+            // instead of reaching into runtime directly. Same effect,
+            // but the view layer no longer knows about
+            // ``handleIslandHover`` semantics.
             withAnimation(Self.hoverSpring) {
-                runtime.handleIslandHover(.tap(tsMs: nowMs()))
+                viewModel.tap()
             }
         }
         // V10 island polish #5 (boring.notch-inspired): swipe down
@@ -139,9 +159,9 @@ struct IslandOverlay: View {
                 .onEnded { value in
                     let dy = value.translation.height
                     if dy > 18 && !isExpanded {
-                        runtime.openIslandSessionList()
+                        viewModel.open()
                     } else if dy < -18 && isExpanded {
-                        runtime.closeIslandSessionList(source: .island)
+                        viewModel.close()
                     }
                 }
         )
@@ -217,7 +237,7 @@ struct IslandOverlay: View {
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.white.opacity(0.42))
             Button {
-                runtime.closeIslandSessionList(source: .island)
+                viewModel.close()
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .semibold))
@@ -283,7 +303,7 @@ struct IslandOverlay: View {
 
                         if session.canAttemptJump {
                             Button {
-                                runtime.jumpToSession(session.sessionId, source: .island)
+                                viewModel.jumpToSession(session.sessionId)
                             } label: {
                                 Image(systemName: "arrow.up.forward.app")
                                     .font(.system(size: 10, weight: .semibold))
@@ -344,11 +364,11 @@ struct IslandOverlay: View {
 
             HStack(spacing: 8) {
                 Button("Deny") {
-                    runtime.resolveApproval(id: approval.approvalId, allow: false, source: .island)
+                    viewModel.resolveApproval(approval, allow: false)
                 }
                 .buttonStyle(VibeIslandButtonStyle(kind: .secondary))
                 Button("Allow") {
-                    runtime.resolveApproval(id: approval.approvalId, allow: true, source: .island)
+                    viewModel.resolveApproval(approval, allow: true)
                 }
                 .buttonStyle(VibeIslandButtonStyle(kind: .primary))
             }
@@ -377,6 +397,7 @@ struct IslandOverlay: View {
         Circle()
             .fill(chipColor)
             .frame(width: isExpanded ? 7 : 7, height: isExpanded ? 7 : 7)
+            .opacity(shouldPulseStatusDot && pulsePhase ? 0.52 : 1.0)
     }
 
     private func compactModule(
@@ -567,13 +588,12 @@ struct IslandOverlay: View {
             .sorted { $0.updatedAtMs > $1.updatedAtMs }
     }
 
-    /// Whether the multi-session glyph stack should be shown:
-    /// 2+ active sessions and no pending approval/notification/progress.
+    /// V11 architecture polish: multi-session glyph visibility now
+    /// reads from the closed `IslandContent` enum. The 2+ session
+    /// count and the "no other higher-priority content" check both
+    /// happen in `IslandViewModel.computeContent`.
     private var shouldShowMultiSessionGlyphs: Bool {
-        visibleSessionsForGlyphs.count >= 2
-            && activeProgress == nil
-            && runtime.approvals.isEmpty
-            && activeNotification == nil
+        viewModel.content.isMultiSession
     }
 
     /// Progress capsule for the compact trailing module (R4).
@@ -591,29 +611,30 @@ struct IslandOverlay: View {
         carouselFacts.count
     }
 
-    /// Facts to rotate through. Order = display order.
-    /// Each slide has a primary text + secondary subtext.
+    /// Facts to rotate through. Order mirrors MioIsland's compact
+    /// density: task/workspace, phase+duration, source, count/pending.
     private var carouselFacts: [(primary: String, secondary: String?)] {
         guard let session = focusSession else { return [] }
         var facts: [(String, String?)] = []
-        // Slide 1: phase + count
-        if activeSessionCount > 1 {
-            facts.append(("\(activeSessionCount)", "live"))
-        } else {
-            facts.append((session.phaseLabel.uppercased(), nil))
+
+        let title = truncateForPill(session.displayTitle, maxChars: 12)
+        if !title.isEmpty {
+            facts.append((title.uppercased(), shortWorkspace(for: session).nilIfEmpty))
         }
-        // Slide 2: age (e.g. "27s")
-        let age = sessionAgeLabel(session)
-        facts.append((age, "ago"))
-        // Slide 3: source short name (e.g. "kiro", "codex")
+
+        facts.append((session.phaseLabel.uppercased(), sessionAgeLabel(session)))
+
         if let src = session.sourceLabel ?? session.source {
-            facts.append((sourceShortName(src).uppercased(), nil))
+            facts.append((sourceShortName(src).uppercased(), session.kind.map(sourceShortName)))
         }
-        // Slide 4: pending count if any
+
         let pending = runtime.approvals.count
-        if pending > 0 {
+        if activeSessionCount > 1 {
+            facts.append(("\(activeSessionCount)", pending > 0 ? "\(pending) ask" : "live"))
+        } else if pending > 0 {
             facts.append(("\(pending)", "pending"))
         }
+
         return Array(facts.prefix(4))
     }
 
@@ -641,28 +662,19 @@ struct IslandOverlay: View {
         }
     }
 
-    /// Whether the current island surface is showing a build-done state.
-    /// We detect this by looking at the structural fields rather than
-    /// by string-matching the detail emoji prefix:
-    ///   * the surface is a build live-activity (activity id starts with
-    ///     ``build-``), and
-    ///   * there's no live progress value (``on_build_done`` deliberately
-    ///     omits the ``progress`` field, so the running capsule is gone).
-    /// A non-empty detail then means we're in the post-completion banner.
+    /// V11 architecture polish: build-done detection now sources
+    /// from the closed `IslandContent` enum. The complex
+    /// activity-id + emoji + progress check lives in
+    /// ``IslandViewModel.computeContent``; views just ask the enum.
     private var isBuildDoneState: Bool {
-        guard let state = runtime.island?.state,
-              state.kind == .liveActivity,
-              let activityId = state.activityId,
-              activityId.lowercased().hasPrefix("build-"),
-              state.progress == nil,
-              let detail = state.detail,
-              !detail.trimmingCharacters(in: .whitespaces).isEmpty
-        else { return false }
-        return detail.contains("✅") || detail.contains("❌")
+        viewModel.content.isBuildDone
     }
 
     private var isBuildFailed: Bool {
-        runtime.island?.state.detail?.contains("❌") == true
+        if case .build(_, _, _, _, let isFailed) = viewModel.content {
+            return isFailed
+        }
+        return false
     }
 
     private var buildDoneMessage: String {
@@ -787,13 +799,32 @@ struct IslandOverlay: View {
         case .connecting, .waitingForRetry: return .orange
         case .connected:
             if activeNotification != nil { return .yellow }
-            if !runtime.approvals.isEmpty { return .orange }
+            if let approval = runtime.approvals.first {
+                return approvalUrgencyColor(approval)
+            }
             if let session = focusSession { return phaseColor(for: session) }
             // V10 island polish #7: idle-state chip color defers to
             // the user's accent preset. Active phases keep their
             // semantic colors (orange = needs approval, blue = busy)
             // because those carry meaning across themes.
             return userAccentColor
+        }
+    }
+
+    private var shouldPulseStatusDot: Bool {
+        guard runtime.bridgeState == .connected else { return false }
+        if !runtime.approvals.isEmpty { return true }
+        if activeNotification != nil { return true }
+        if let session = focusSession {
+            return session.phase != .completed
+                && session.phase != .failed
+                && session.phase != .unknown
+        }
+        switch runtime.island?.state.kind {
+        case .liveActivity, .sessionList:
+            return true
+        case .compact, .empty, .notificationCard, .none:
+            return false
         }
     }
 
@@ -1004,31 +1035,27 @@ struct IslandOverlay: View {
     }
 
     private func phaseColor(for session: SessionRow) -> Color {
-        // V10 island polish #3 (MioIsland-inspired): unattended
-        // escalation. Waiting-for-{approval,answer} phases tint
-        // orange after 30s and red after 60s so a stuck Allow / Deny
-        // visually nags the user.
-        if session.phase == .waitingForApproval
-            || session.phase == .waitingForAnswer {
-            let waitMs = max(0, nowMs() - session.updatedAtMs)
-            if waitMs > 60_000 {
-                return Color(red: 0.94, green: 0.27, blue: 0.27) // red
-            }
-            if waitMs > 30_000 {
-                return Color(red: 1.0, green: 0.6, blue: 0.2) // orange
-            }
+        PhaseColorTable.resolve(
+            session.phase,
+            createdAtMs: actionableStartedAtMs(for: session),
+            nowMs: nowMs()
+        ).foreground
+    }
+
+    private func actionableStartedAtMs(for session: SessionRow) -> Int {
+        if let approval = approval(for: session),
+           approval.createdAtMs > 0 {
+            return approval.createdAtMs
         }
-        switch session.phase {
-        case .waitingForApproval: return .orange
-        case .waitingForAnswer: return .yellow
-        case .thinking: return .purple
-        case .editing: return .blue
-        case .runningTool: return .cyan
-        case .testing: return .mint
-        case .failed: return .red
-        case .completed: return .green
-        case .running, .unknown: return Color(red: 0.29, green: 0.86, blue: 0.46)
-        }
+        return session.updatedAtMs > 0 ? session.updatedAtMs : session.createdAtMs
+    }
+
+    private func approvalUrgencyColor(_ approval: ApprovalRow) -> Color {
+        PhaseColorTable.resolve(
+            .waitingForApproval,
+            createdAtMs: approval.createdAtMs,
+            nowMs: nowMs()
+        ).foreground
     }
 
     /// V10 #4: phases where work is actively progressing — show
@@ -1226,6 +1253,12 @@ private extension Collection {
     /// the facts list shrinks between ticks.
     subscript(safe index: Index) -> Element? {
         indices.contains(index) ? self[index] : nil
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
     }
 }
 

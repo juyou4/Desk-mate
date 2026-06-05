@@ -38,11 +38,64 @@ public struct PhaseColorTriple: Equatable, Sendable {
     }
 }
 
+/// Waiting-state urgency derived from how long an actionable item has
+/// been unattended. MioIsland uses this to move stale asks from a
+/// neutral warning into a stronger visual state without opening a
+/// popup.
+public enum PhaseUrgency: Equatable, Sendable {
+    case normal
+    case unattended
+    case overdue
+}
+
 /// Resolver enum that owns the phase → ``PhaseColorTriple`` mapping.
 /// The single static method ``resolve(_:scheme:)`` is the only entry
 /// point; callers MUST NOT define ad-hoc colour literals for any of
 /// the surfaces listed in R7.2.
 public enum PhaseColorTable {
+    public static let unattendedThresholdMs = 30_000
+    public static let overdueThresholdMs = 60_000
+
+    public static func urgency(
+        phase: SessionRow.Phase,
+        createdAtMs: Int,
+        nowMs: Int
+    ) -> PhaseUrgency {
+        guard phase == .waitingForApproval || phase == .waitingForAnswer,
+              createdAtMs > 0
+        else { return .normal }
+        let waitedMs = max(0, nowMs - createdAtMs)
+        if waitedMs >= overdueThresholdMs { return .overdue }
+        if waitedMs >= unattendedThresholdMs { return .unattended }
+        return .normal
+    }
+
+    public static func resolve(
+        _ phase: SessionRow.Phase,
+        createdAtMs: Int,
+        nowMs: Int,
+        scheme: ColorScheme = .dark
+    ) -> PhaseColorTriple {
+        switch urgency(phase: phase, createdAtMs: createdAtMs, nowMs: nowMs) {
+        case .normal:
+            return resolve(phase, scheme: scheme)
+        case .unattended:
+            let base = Color(red: 1.0, green: 0.6, blue: 0.2)
+            return PhaseColorTriple(
+                foreground: base,
+                background: base.opacity(0.16),
+                stroke: base.opacity(0.28)
+            )
+        case .overdue:
+            let base = Color(red: 0.94, green: 0.27, blue: 0.27)
+            return PhaseColorTriple(
+                foreground: base,
+                background: base.opacity(0.18),
+                stroke: base.opacity(0.32)
+            )
+        }
+    }
+
     /// Resolve the colour triple for the given phase.
     ///
     /// - Parameters:

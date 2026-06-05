@@ -352,6 +352,78 @@ final class CompanionIntentDispatcherTests: XCTestCase {
     }
 
     // ------------------------------------------------------------------
+    // bindModuleRegistration
+    // ------------------------------------------------------------------
+
+    func testDecodeRegisterModuleParsesModuleSpec() throws {
+        let intent = CompanionIntent(
+            kind: .registerModule,
+            payload: [
+                "id": .string("kiro.spec"),
+                "kind": .string("live_activity"),
+                "activity_prefix": .string("kiro-spec-"),
+                "title": .string("KIRO"),
+                "subtitle": .string("{detail}"),
+                "image": .string("k.circle"),
+                "priority": .int(80),
+            ]
+        )
+
+        let spec = try CompanionIntentDispatcher.decodeRegisterModule(from: intent)
+
+        XCTAssertEqual(spec.id, "kiro.spec")
+        XCTAssertEqual(spec.kind, "live_activity")
+        XCTAssertEqual(spec.activityPrefix, "kiro-spec-")
+        XCTAssertEqual(spec.title, "KIRO")
+        XCTAssertEqual(spec.subtitle, "{detail}")
+        XCTAssertEqual(spec.image, "k.circle")
+        XCTAssertEqual(spec.priority, 80)
+    }
+
+    func testBindModuleRegistrationAppliesDecodedModule() {
+        let dispatcher = CompanionIntentDispatcher()
+        var captured: RegisteredIslandModule?
+        dispatcher.bindModuleRegistration { module in
+            captured = module
+        }
+
+        let result = dispatcher.dispatch(CompanionIntent(
+            kind: .registerModule,
+            payload: [
+                "id": .string("kiro.spec"),
+                "kind": .string("live_activity"),
+                "activity_prefix": .string("kiro-spec-"),
+                "title": .string("KIRO"),
+            ]
+        ))
+
+        XCTAssertEqual(result, .handled(.registerModule))
+        XCTAssertEqual(captured?.id, "kiro.spec")
+        XCTAssertTrue(captured?.claims(state: IslandSurfaceState(
+            kind: .liveActivity,
+            activityId: "kiro-spec-plan"
+        )) == true)
+    }
+
+    func testBindModuleRegistrationReportsMalformedPayload() {
+        let dispatcher = CompanionIntentDispatcher()
+        var errors: [Error] = []
+        var captured: RegisteredIslandModule?
+        dispatcher.bindModuleRegistration(
+            apply: { captured = $0 },
+            onDecodeError: { errors.append($0) }
+        )
+
+        dispatcher.dispatch(CompanionIntent(
+            kind: .registerModule,
+            payload: ["kind": .string("live_activity")]
+        ))
+
+        XCTAssertNil(captured)
+        XCTAssertEqual(errors.count, 1)
+    }
+
+    // ------------------------------------------------------------------
     // bind(bridge:)
     // ------------------------------------------------------------------
 

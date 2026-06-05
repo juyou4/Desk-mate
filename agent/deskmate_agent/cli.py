@@ -6,6 +6,8 @@ Two families today:
   that the running agent picks up to drive the island build pill.
 - ``hook ingest`` — normalize external agent hook JSON into the file queue
   consumed by the resident Python agent.
+- ``island module register`` — enqueue an external island module spec for the
+  resident agent to forward as a typed ``register_module`` intent.
 - ``today`` — read the coding-session SQLite directly (no agent
   round-trip) and print a daily coding summary.
 
@@ -18,6 +20,7 @@ Usage examples (all of these are safe to copy into a Makefile /
     deskmate build-failed "cargo test" --message "42 failed"
     deskmate build-dismiss
     echo '{"session_id":"s1","event":"session.started"}' | deskmate hook ingest --source codex
+    deskmate island module register kiro.spec --kind live_activity --title KIRO --activity-prefix kiro-spec-
     deskmate today            # human readable summary
     deskmate today --json     # machine readable
 
@@ -290,6 +293,60 @@ def _build_parser() -> argparse.ArgumentParser:
         help="remove Deskmate-managed hooks without touching user hooks",
     )
     _add_hook_management_flags(uninstall)
+
+    island = sub.add_parser(
+        "island",
+        help="manage external island integrations",
+    )
+    island_sub = island.add_subparsers(dest="island_cmd", required=True)
+    module = island_sub.add_parser(
+        "module",
+        help="manage externally registered island modules",
+    )
+    module_sub = module.add_subparsers(dest="module_cmd", required=True)
+    register = module_sub.add_parser(
+        "register",
+        help="enqueue an island module registration for the resident agent",
+    )
+    register.add_argument("id", help="stable module id, e.g. kiro.spec")
+    register.add_argument(
+        "--kind",
+        required=True,
+        help="surface kind, e.g. live_activity or notification_card",
+    )
+    register.add_argument("--title", required=True, help="compact module title")
+    register.add_argument(
+        "--priority",
+        type=int,
+        default=50,
+        help="claim priority when multiple modules match (default 50)",
+    )
+    register.add_argument(
+        "--activity-prefix",
+        default=None,
+        help="only claim live activities whose activity_id starts with this prefix",
+    )
+    register.add_argument(
+        "--subtitle",
+        default=None,
+        help="optional template; supports {detail}, {activity}, {session}",
+    )
+    register.add_argument(
+        "--image",
+        default=None,
+        help="optional SF Symbol name, e.g. k.circle",
+    )
+    register.add_argument(
+        "--queue-dir",
+        default=None,
+        help="override queue dir (defaults to $DESKMATE_MODULE_REGISTRATIONS_DIR or ~/.deskmate/module-registrations)",
+    )
+    register.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="print the enqueued spec as JSON",
+    )
     return p
 
 
@@ -336,10 +393,40 @@ def main(argv: list[str] | None = None) -> int:
         return _run_project(args)
     elif args.command == "hook":
         return _run_hook(args)
+    elif args.command == "island":
+        return _run_island(args)
     else:  # pragma: no cover — argparse enforces this
         return 2
     _write(payload)
     # Quiet by default — Makefile integrations don't want extra noise.
+    return 0
+
+
+def _run_island(args: argparse.Namespace) -> int:
+    if args.island_cmd != "module" or args.module_cmd != "register":
+        return 2
+    from .module_registrations import write_module_registration
+    from .protocol import IslandModuleSpec
+
+    try:
+        spec = IslandModuleSpec(
+            id=str(args.id),
+            kind=str(args.kind),
+            title=str(args.title),
+            priority=int(args.priority),
+            activity_prefix=args.activity_prefix,
+            subtitle=args.subtitle,
+            image=args.image,
+        )
+    except ValueError as exc:
+        sys.stderr.write(f"error: invalid module spec: {exc}\n")
+        return 2
+    queue_dir = Path(args.queue_dir).expanduser() if args.queue_dir else None
+    path = write_module_registration(spec, queue_dir=queue_dir)
+    if getattr(args, "as_json", False):
+        payload = spec.model_dump(mode="json", exclude_none=True)
+        payload["queue_path"] = str(path)
+        sys.stdout.write(json.dumps(payload, indent=2) + "\n")
     return 0
 
 

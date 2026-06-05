@@ -63,6 +63,25 @@ echo '{"session_id":"s1","event":"session.started","title":"Codex demo"}' \
   | python -m deskmate_agent.cli hook ingest --source codex
 ```
 
+## External Island Modules
+
+External agents can register a compact/live-activity display module without
+opening the Swift IPC socket:
+
+```bash
+deskmate island module register kiro.spec \
+  --kind live_activity \
+  --title KIRO \
+  --activity-prefix kiro-spec- \
+  --subtitle '{detail}' \
+  --image k.circle \
+  --priority 80
+```
+
+The CLI writes a spec into `~/.deskmate/module-registrations/`. The resident
+agent forwards it as a typed `register_module` intent and replays the latest
+registration for each id when Swift reconnects.
+
 ## Hook Installers
 
 Hook installation is opt-in and reversible. Deskmate only manages entries it

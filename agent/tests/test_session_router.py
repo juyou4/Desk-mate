@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from deskmate_agent.protocol.actions import (
     ActionSource,
     ActionTarget,

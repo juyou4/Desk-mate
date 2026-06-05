@@ -178,6 +178,57 @@ final class IslandModuleRegistryTests: XCTestCase {
         XCTAssertEqual(idle?.title, "DM")
     }
 
+    func testRegisteredModuleClaimsPrefixAndRendersTemplates() {
+        let module = RegisteredIslandModule(spec: IslandModuleSpec(
+            id: "kiro.spec",
+            priority: 80,
+            kind: "live_activity",
+            activityPrefix: "kiro-spec-",
+            title: "KIRO",
+            subtitle: "{detail}",
+            image: "k.circle"
+        ))
+
+        let match = IslandSurfaceState(
+            kind: .liveActivity,
+            activityId: "kiro-spec-plan",
+            detail: "Planning"
+        )
+        let miss = IslandSurfaceState(
+            kind: .liveActivity,
+            activityId: "build-demo",
+            detail: "Build"
+        )
+
+        XCTAssertTrue(module.claims(state: match))
+        XCTAssertFalse(module.claims(state: miss))
+        let descriptor = module.render(state: match)
+        XCTAssertEqual(descriptor?.title, "KIRO")
+        XCTAssertEqual(descriptor?.subtitle, "Planning")
+        XCTAssertEqual(descriptor?.systemImageName, "k.circle")
+    }
+
+    func testRegisteredModuleCanOverrideDefaultLiveActivity() {
+        var registry = IslandModuleRegistry.deskmateDefaultModules()
+        registry.register(RegisteredIslandModule(spec: IslandModuleSpec(
+            id: "kiro.spec",
+            priority: 90,
+            kind: "live_activity",
+            activityPrefix: "kiro-spec-",
+            title: "KIRO",
+            subtitle: "{activity}"
+        )))
+
+        let descriptor = registry.renderDescriptor(for: IslandSurfaceState(
+            kind: .liveActivity,
+            activityId: "kiro-spec-plan",
+            detail: "Planning"
+        ))
+
+        XCTAssertEqual(descriptor?.title, "KIRO")
+        XCTAssertEqual(descriptor?.subtitle, "kiro-spec-plan")
+    }
+
     // MARK: - Dispatch
 
     func testDispatchStopsAtFirstHandler() {

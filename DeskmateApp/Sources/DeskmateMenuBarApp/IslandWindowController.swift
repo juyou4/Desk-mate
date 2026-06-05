@@ -87,8 +87,14 @@ final class IslandWindowController {
         if runtime.degradationPolicy.islandOrderOut { return }
 
         guard window == nil else { return }
+        // V11 architecture polish: ViewModel that collapses the
+        // runtime's many @Published fields into IslandStatus +
+        // IslandContent. Owned by the controller for the lifetime
+        // of the panel so SwiftUI doesn't recreate it on every
+        // resize.
+        let viewModel = IslandViewModel(runtime: runtime)
         let host = IslandHostingView(
-            rootView: IslandOverlay(runtime: runtime),
+            rootView: IslandOverlay(runtime: runtime, viewModel: viewModel),
             runtime: runtime
         )
         host.translatesAutoresizingMaskIntoConstraints = true
@@ -137,6 +143,11 @@ final class IslandWindowController {
         w.contentView = host
 
         positionAtTopCenter(window: w)
+        // V10 polish (NotchDrop-inspired): slide the panel down from
+        // above the screen on first appearance instead of just popping
+        // in. Uses NSAnimationContext on setFrame; the visible content
+        // animation is left to SwiftUI's built-in spring on the surface.
+        performInitialSlideIn(window: w)
         w.orderFrontRegardless()
 
         self.window = w
@@ -276,6 +287,34 @@ final class IslandWindowController {
             height: size.height
         )
         w.setFrame(rect, display: true)
+    }
+
+    /// V10 polish: NotchDrop-style slide-in. Off-screen above the
+    /// notch, then animates down to the docked y position over 0.45s.
+    /// Run once on initial install so users see the pill "drop"
+    /// instead of pop. Uses NSAnimationContext directly because
+    /// SwiftUI's animation only kicks in once the view is mounted.
+    private func performInitialSlideIn(window w: NSPanel) {
+        guard let screen = targetScreen() else { return }
+        let finalFrame = w.frame
+        // Start position: panel pushed up so it's just above the
+        // visible top of the screen.
+        let startFrame = NSRect(
+            x: finalFrame.origin.x,
+            y: screen.frame.maxY,
+            width: finalFrame.width,
+            height: finalFrame.height
+        )
+        w.setFrame(startFrame, display: false)
+        DispatchQueue.main.async {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.45
+                ctx.timingFunction = CAMediaTimingFunction(
+                    controlPoints: 0.16, 1.0, 0.3, 1.0
+                ) // easeOutExpo — boring.notch fallback curve
+                w.animator().setFrame(finalFrame, display: true)
+            }
+        }
     }
 
     private func resizeForCurrentState() {
@@ -514,8 +553,8 @@ final class IslandWindowController {
         localMouseMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.mouseMoved, .leftMouseDown, .rightMouseDown, .otherMouseDown]
         ) { [weak self] event in
-            self?.handleMouseEvent(event, isGlobal: false)
-            return event
+            guard let self else { return event }
+            return self.handleLocalMouseEvent(event) ? nil : event
         }
         globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.mouseMoved, .leftMouseDown, .rightMouseDown, .otherMouseDown]
@@ -541,6 +580,19 @@ final class IslandWindowController {
         globalMouseMonitor = nil
     }
 
+    private func handleLocalMouseEvent(_ event: NSEvent) -> Bool {
+        guard window != nil else { return false }
+        if event.type == .mouseMoved {
+            handleMouseEvent(event, isGlobal: false)
+            return false
+        }
+        if consumeExpandedPassthroughClick(event) {
+            return true
+        }
+        handleMouseEvent(event, isGlobal: false)
+        return false
+    }
+
     private func handleMouseEvent(_ event: NSEvent, isGlobal: Bool) {
         guard window != nil else { return }
         if event.type == .mouseMoved {
@@ -551,6 +603,29 @@ final class IslandWindowController {
             return
         }
         handleClick(at: NSEvent.mouseLocation)
+    }
+
+    private func consumeExpandedPassthroughClick(_ event: NSEvent) -> Bool {
+        guard runtime.isIslandExpanded,
+              let w = window,
+              event.window === w,
+              let localPoint = panelLocalPoint(for: NSEvent.mouseLocation, margin: 0),
+              let geometry = geometryForCurrentWindow(),
+              geometry.shouldPassthroughExpandedClick(localPoint: localPoint)
+        else { return false }
+
+        runtime.closeIslandSessionList(source: .island)
+        w.ignoresMouseEvents = true
+        w.level = .mainMenu + 3
+        repostPassthroughClick(event)
+        return true
+    }
+
+    private func repostPassthroughClick(_ event: NSEvent) {
+        guard let cgEvent = event.cgEvent?.copy() else { return }
+        DispatchQueue.main.async {
+            cgEvent.post(tap: .cghidEventTap)
+        }
     }
 
     private func updateHoverState(for screenPoint: NSPoint) {
@@ -694,11 +769,12 @@ private final class IslandHostingView<Content: View>: NSHostingView<Content> {
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard let runtime else { return nil }
-        // Panel is always at expanded size. When collapsed, the
-        // visible surface is a small notch centered in the large
-        // panel. We need to map the hit point against the correct
-        // rect within the expanded panel bounds.
-        let rect = interactionRect(for: runtime, in: bounds)
+        let rect: NSRect
+        if runtime.isIslandExpanded {
+            rect = interactionRect(for: runtime, in: bounds)
+        } else {
+            rect = IslandInteractionGeometry.collapsedHitBandRect(in: bounds)
+        }
         guard rect.contains(point) else { return nil }
         return super.hitTest(point) ?? self
     }

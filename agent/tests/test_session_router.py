@@ -16,7 +16,7 @@ from deskmate_agent.sessions import (
     SessionState,
     SessionStore,
 )
-from deskmate_agent.sessions.router import _workspace_candidates
+from deskmate_agent.sessions.router import _activation_candidates, _workspace_candidates
 
 
 def _store_with(sid: str) -> SessionStore:
@@ -263,6 +263,36 @@ async def test_session_jump_cli_agent_falls_back_to_terminal_activation() -> Non
     assert activated == ["Terminal"]
 
 
+async def test_session_jump_activation_tries_candidate_fallbacks() -> None:
+    store = SessionStore()
+    store.upsert(
+        SessionInfo(
+            session_id="s1",
+            source="claude_code",
+            kind="cli_agent",
+            created_at_ms=1_000,
+            updated_at_ms=1_000,
+        )
+    )
+    activated: list[str] = []
+
+    def activate(app: str) -> bool:
+        activated.append(app)
+        return app == "Ghostty"
+
+    router = SessionInteractionRouter(
+        store,
+        clock=lambda: 7_777,
+        opener=lambda _target: False,
+        activator=activate,
+    )
+
+    result = await router.handle(_jump("s1"))
+
+    assert result.effect == "session.jump.activated"
+    assert activated == ["Terminal", "iTerm", "Ghostty"]
+
+
 def test_workspace_candidates_cover_supported_ide_and_agents() -> None:
     assert _workspace_candidates("cursor") == ["Cursor"]
     assert _workspace_candidates("windsurf") == ["Windsurf"]
@@ -270,6 +300,20 @@ def test_workspace_candidates_cover_supported_ide_and_agents() -> None:
     assert _workspace_candidates("codex")[0] == "Codex"
     assert _workspace_candidates("claude_code")[0] == "Terminal"
     assert _workspace_candidates("unknown", "cli_agent")[0] == "Terminal"
+    assert _workspace_candidates("zed") == ["Zed"]
+    assert _workspace_candidates("gemini")[0] == "Terminal"
+
+
+def test_activation_candidates_cover_supported_ide_and_agents() -> None:
+    assert _activation_candidates("cursor") == ["Cursor"]
+    assert _activation_candidates("windsurf") == ["Windsurf"]
+    assert _activation_candidates("vscode") == ["Visual Studio Code"]
+    assert _activation_candidates("xcode") == ["Xcode"]
+    assert _activation_candidates("jetbrains")[0] == "IntelliJ IDEA"
+    assert _activation_candidates("zed") == ["Zed"]
+    assert _activation_candidates("sublime") == ["Sublime Text"]
+    assert _activation_candidates("aider")[0] == "Terminal"
+    assert _activation_candidates("unknown", "cli_agent")[0] == "Terminal"
 
 
 async def test_question_answer_updates_waiting_session() -> None:

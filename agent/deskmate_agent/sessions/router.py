@@ -25,7 +25,14 @@ from .store import SessionStore
 
 _LOG = get_logger("deskmate_agent.sessions.router")
 
-_ALLOWED_JUMP_SCHEMES = frozenset({"codex", "file", "vscode", "cursor", "windsurf"})
+_ALLOWED_JUMP_SCHEMES = frozenset({
+    "codex",
+    "file",
+    "vscode",
+    "cursor",
+    "windsurf",
+    "vscode-insiders",
+})
 
 
 def _default_clock() -> int:
@@ -156,12 +163,12 @@ class SessionInteractionRouter:
             return RouterResult(
                 handled=True, effect="session.jump.opened", session_id=sid
             )
-        activation_target = self._activation_target(existing)
-        if activation_target is not None and self._activator(activation_target):
-            self._store.touch(sid, self._clock(), new_state=SessionState.ACTIVE)
-            return RouterResult(
-                handled=True, effect="session.jump.activated", session_id=sid
-            )
+        for activation_target in self._activation_targets(existing):
+            if self._activator(activation_target):
+                self._store.touch(sid, self._clock(), new_state=SessionState.ACTIVE)
+                return RouterResult(
+                    handled=True, effect="session.jump.activated", session_id=sid
+                )
         self._store.touch(sid, self._clock(), new_state=SessionState.ACTIVE)
         return RouterResult(
             handled=True, effect="session.jump.accepted", session_id=sid
@@ -271,14 +278,13 @@ class SessionInteractionRouter:
         return str(path), apps
 
     @staticmethod
-    def _activation_target(info: object) -> str | None:
+    def _activation_targets(info: object) -> list[str]:
         source = getattr(info, "source", None)
         kind = getattr(info, "kind", None)
-        candidates = _activation_candidates(
+        return _activation_candidates(
             str(source) if source is not None else "",
             str(kind) if kind is not None else "",
         )
-        return candidates[0] if candidates else None
 
 
 def _workspace_candidates(source: str, kind: str = "") -> list[str]:
@@ -293,10 +299,31 @@ def _workspace_candidates(source: str, kind: str = "") -> list[str]:
         return ["Xcode"]
     if normalized == "jetbrains":
         return ["IntelliJ IDEA", "PyCharm", "WebStorm", "GoLand"]
+    if normalized == "zed":
+        return ["Zed"]
+    if normalized == "trae":
+        return ["Trae"]
+    if normalized == "sublime":
+        return ["Sublime Text"]
+    if normalized == "nova":
+        return ["Nova"]
     if normalized == "codex":
         return ["Codex", "Terminal", "iTerm", "Ghostty", "Warp"]
-    if normalized in {"claude_code", "terminal", "opencode"} or kind == "cli_agent":
-        return ["Terminal", "iTerm", "Ghostty", "Warp"]
+    if normalized in {
+        "claude_code",
+        "terminal",
+        "opencode",
+        "aider",
+        "gemini",
+        "kimi",
+        "qwen",
+        "factory_droid",
+        "codebuddy",
+        "qoder",
+        "neovim",
+        "warp",
+    } or kind == "cli_agent":
+        return ["Terminal", "iTerm", "Ghostty", "Warp", "WezTerm", "kitty"]
     return []
 
 
@@ -316,8 +343,29 @@ def _activation_candidates(source: str, kind: str = "") -> list[str]:
         return ["Xcode"]
     if normalized == "jetbrains":
         return ["IntelliJ IDEA", "PyCharm", "WebStorm", "GoLand"]
-    if normalized in {"terminal", "opencode"} or kind == "cli_agent":
-        return ["Terminal", "iTerm", "Ghostty", "Warp"]
+    if normalized == "zed":
+        return ["Zed"]
+    if normalized == "trae":
+        return ["Trae"]
+    if normalized == "sublime":
+        return ["Sublime Text"]
+    if normalized == "nova":
+        return ["Nova"]
+    if normalized == "warp":
+        return ["Warp", "Terminal", "iTerm", "Ghostty"]
+    if normalized in {
+        "terminal",
+        "opencode",
+        "aider",
+        "gemini",
+        "kimi",
+        "qwen",
+        "factory_droid",
+        "codebuddy",
+        "qoder",
+        "neovim",
+    } or kind == "cli_agent":
+        return ["Terminal", "iTerm", "Ghostty", "Warp", "WezTerm", "kitty"]
     return []
 
 

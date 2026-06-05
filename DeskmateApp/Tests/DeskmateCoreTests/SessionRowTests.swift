@@ -106,6 +106,71 @@ final class SessionRowTests: XCTestCase {
         XCTAssertEqual(row.activityLine, "Codex · work · cmd: pytest tests/test_app.py")
     }
 
+    func testCockpitPresentationExtras() {
+        let row = SessionRow(
+            sessionId: "s1",
+            source: "codex",
+            kind: "hook_session",
+            processId: 42,
+            extras: [
+                "prompt": "Refactor the island row",
+                "last_assistant_message": "Implemented the compact cockpit.",
+                "branch": "feat/island-cockpit",
+                "window_title": "IslandOverlay.swift",
+                "phase_source": "unobserved"
+            ]
+        )
+        XCTAssertEqual(row.promptText, "Refactor the island row")
+        XCTAssertEqual(row.assistantText, "Implemented the compact cockpit.")
+        XCTAssertEqual(row.branchName, "feat/island-cockpit")
+        XCTAssertEqual(row.windowTitle, "IslandOverlay.swift")
+        XCTAssertEqual(row.phaseSource, "unobserved")
+        XCTAssertEqual(row.kindLabel, "Hook")
+    }
+
+    func testAgentHealthSummaryRollsUpRuntimeVisibility() {
+        let rows = [
+            SessionRow(
+                sessionId: "hook",
+                phase: .waitingForApproval,
+                source: "codex",
+                kind: "hook_session",
+                extras: ["phase_source": "hook"]
+            ),
+            SessionRow(
+                sessionId: "cli",
+                source: "claude_code",
+                kind: "cli_agent",
+                extras: ["phase_source": "unobserved"]
+            ),
+            SessionRow(
+                sessionId: "ide",
+                source: "cursor",
+                kind: "gui_ide"
+            ),
+            SessionRow(
+                sessionId: "closed",
+                state: .closed,
+                source: "windsurf",
+                kind: "gui_ide"
+            )
+        ]
+
+        let summary = AgentHealthSummary(sessions: rows)
+        XCTAssertEqual(summary.total, 4)
+        XCTAssertEqual(summary.active, 3)
+        XCTAssertEqual(summary.hookSessions, 1)
+        XCTAssertEqual(summary.cliAgents, 1)
+        XCTAssertEqual(summary.guiIDEs, 1)
+        XCTAssertEqual(summary.unobserved, 1)
+        XCTAssertEqual(summary.awaitingAction, 1)
+        XCTAssertTrue(summary.statusLine.contains("Active 3"))
+        XCTAssertTrue(summary.statusLine.contains("action 1"))
+        XCTAssertTrue(summary.kindLine.contains("Hook 1"))
+        XCTAssertTrue(summary.sourceLine.contains("Codex 1"))
+        XCTAssertEqual(summary.expandedBadgeText, "1 action")
+    }
+
     func testActivityLineFallsBackToFileAndTool() {
         let file = SessionRow(
             sessionId: "s1",

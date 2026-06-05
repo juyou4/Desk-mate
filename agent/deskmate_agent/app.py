@@ -89,6 +89,7 @@ from .sessions import (
     SessionInfo,
     SessionInteractionRouter,
     SessionPhase,
+    SessionState,
     SessionStore,
 )
 from .skills import (
@@ -129,6 +130,26 @@ def _phase_for_agent_event(event: AgentEvent) -> SessionPhase:
     if isinstance(event, (SessionActivityUpdated, SessionStarted)):
         return event.phase
     return SessionPhase.RUNNING
+
+
+_STALE_HOOK_PHASES = {
+    SessionPhase.THINKING,
+    SessionPhase.EDITING,
+    SessionPhase.RUNNING_TOOL,
+    SessionPhase.TESTING,
+    SessionPhase.RUNNING,
+}
+
+
+def _is_reapable_hook_session(session: SessionInfo) -> bool:
+    if session.state is not SessionState.ACTIVE:
+        return False
+    if session.phase not in _STALE_HOOK_PHASES:
+        return False
+    if session.kind == "hook_session":
+        return True
+    extras = session.extras or {}
+    return bool(extras.get("hook_source") or extras.get("hook_event"))
 
 
 def _default_bundled_packs_dir() -> Path:
@@ -182,6 +203,11 @@ class AppConfig:
     #: this explicitly; tests and embedded AppConfig instances stay off unless
     #: requested.
     codex_app_server_enabled: bool = False
+    #: Safety net for hook sources that emit activity starts but miss the
+    #: corresponding stop/completed event. Actionable states are excluded.
+    stale_hook_session_reaper_enabled: bool = True
+    stale_hook_session_ttl_s: float = 45.0
+    stale_hook_session_poll_s: float = 5.0
 
 
 LLMPrewarmFn = Callable[[], Awaitable[None]]
@@ -719,6 +745,13 @@ class App:
         rt = self._require()
         if self.config.prewarm_enabled:
             self._bg_tasks.append(asyncio.create_task(self._run_prewarm()))
+        if self.config.stale_hook_session_reaper_enabled:
+            self._bg_tasks.append(
+                asyncio.create_task(
+                    self._run_stale_hook_session_reaper(),
+                    name="stale-hook-session-reaper",
+                )
+            )
         rt.domain_projector.start()
         rt.approval_surface.start()
         await rt.reminder_scheduler.start()
@@ -867,6 +900,43 @@ class App:
             await self._llm_prewarm()
         except Exception as exc:  # noqa: BLE001 — prewarm failure is never fatal
             _LOG.warning("app.prewarm_failed", error=str(exc))
+
+    async def _run_stale_hook_session_reaper(self) -> None:
+        while True:
+            await asyncio.sleep(max(self.config.stale_hook_session_poll_s, 0.1))
+            try:
+                await self._reap_stale_hook_sessions()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                _LOG.warning("app.stale_hook_session_reaper_failed", error=str(exc))
+
+    async def _reap_stale_hook_sessions(self) -> int:
+        rt = self._require()
+        now_ms = int(time.time() * 1000)
+        cutoff_ms = now_ms - int(max(self.config.stale_hook_session_ttl_s, 0.1) * 1000)
+        count = 0
+        for session in rt.session_store.list():
+            if not _is_reapable_hook_session(session):
+                continue
+            if session.updated_at_ms > cutoff_ms:
+                continue
+            rt.session_store.upsert(
+                session.model_copy(
+                    update={
+                        "state": SessionState.CLOSED,
+                        "phase": SessionPhase.COMPLETED,
+                        "priority": Priority.P2,
+                        "updated_at_ms": now_ms,
+                        "closed_at_ms": session.closed_at_ms or now_ms,
+                        "summary": session.summary or "No recent hook activity.",
+                    }
+                )
+            )
+            count += 1
+        if count:
+            await self._send_snapshot_best_effort()
+        return count
 
     async def _handle_module_registration(self, spec: IslandModuleSpec) -> None:
         """Store and forward an external island module registration.

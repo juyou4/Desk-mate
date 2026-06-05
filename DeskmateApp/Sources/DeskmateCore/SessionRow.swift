@@ -259,6 +259,58 @@ public struct SessionRow: Equatable, Sendable, Codable {
         cleanExtra("file_path")
     }
 
+    public var phaseSource: String? {
+        cleanExtra("phase_source")
+    }
+
+    public var runtimeCommand: String? {
+        cleanExtra("runtime_command") ?? cleanExtra("command")
+    }
+
+    public var promptText: String? {
+        cleanExtra("last_user_prompt")
+            ?? cleanExtra("latest_user_prompt")
+            ?? cleanExtra("user_prompt")
+            ?? cleanExtra("prompt")
+    }
+
+    public var assistantText: String? {
+        cleanExtra("last_assistant_message")
+            ?? cleanExtra("latest_assistant_message")
+            ?? cleanExtra("assistant_message")
+            ?? cleanExtra("assistant")
+    }
+
+    public var branchName: String? {
+        cleanExtra("branch")
+            ?? cleanExtra("git_branch")
+            ?? cleanExtra("worktree_branch")
+    }
+
+    public var windowTitle: String? {
+        cleanExtra("window_title")
+    }
+
+    public var workspaceName: String {
+        workspaceLabel
+    }
+
+    public var kindLabel: String? {
+        guard let raw = kind?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty
+        else { return nil }
+        switch raw {
+        case "cli_agent": return "CLI"
+        case "gui_ide": return "IDE"
+        case "hook_session": return "Hook"
+        default:
+            return raw
+                .split(separator: "_")
+                .map { $0.prefix(1).uppercased() + $0.dropFirst() }
+                .joined(separator: " ")
+        }
+    }
+
     public var activityLine: String {
         let source = sourceLabel ?? "Agent"
         let workspace = workspaceLabel

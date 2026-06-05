@@ -1030,8 +1030,8 @@ runner.test("island-interaction-geo: expanded size grows with rows and caps") {
         isExpanded: true,
         activeCount: 8
     ))
-    try runner.expect(small.expandedSurfaceSize.height == 180, "one row should use minimum expanded height")
-    try runner.expect(large.expandedSurfaceSize.height == 380, "many rows should cap expanded height")
+    try runner.expect(small.expandedSurfaceSize.height == 190, "one row should fit cockpit + health strip")
+    try runner.expect(large.expandedSurfaceSize.height == 420, "many rows should cap expanded height")
     try runner.expect(large.surfaceRectInPanel.maxY == large.panelSize.height, "expanded surface should pin to panel top")
 }
 
@@ -1676,6 +1676,47 @@ runner.test("session-row: decodes extras and derives activity line") {
         row.activityLine == "Codex · work · cmd: pytest tests/test_app.py",
         "activity line wrong: \(row.activityLine)"
     )
+}
+
+runner.test("session-row: agent health summary rolls up runtime visibility") {
+    let rows = [
+        SessionRow(
+            sessionId: "hook",
+            phase: .waitingForApproval,
+            source: "codex",
+            kind: "hook_session",
+            extras: ["phase_source": "hook"]
+        ),
+        SessionRow(
+            sessionId: "cli",
+            source: "claude_code",
+            kind: "cli_agent",
+            extras: ["phase_source": "unobserved"]
+        ),
+        SessionRow(
+            sessionId: "ide",
+            source: "cursor",
+            kind: "gui_ide"
+        ),
+        SessionRow(
+            sessionId: "closed",
+            state: .closed,
+            source: "windsurf",
+            kind: "gui_ide"
+        )
+    ]
+    let summary = AgentHealthSummary(sessions: rows)
+    try runner.expect(summary.total == 4, "total wrong")
+    try runner.expect(summary.active == 3, "active wrong")
+    try runner.expect(summary.hookSessions == 1, "hook count wrong")
+    try runner.expect(summary.cliAgents == 1, "cli count wrong")
+    try runner.expect(summary.guiIDEs == 1, "ide count wrong")
+    try runner.expect(summary.unobserved == 1, "unobserved count wrong")
+    try runner.expect(summary.awaitingAction == 1, "action count wrong")
+    try runner.expect(summary.statusLine.contains("Active 3"), "status line wrong: \(summary.statusLine)")
+    try runner.expect(summary.kindLine.contains("Hook 1"), "kind line wrong: \(summary.kindLine)")
+    try runner.expect(summary.sourceLine.contains("Codex 1"), "source line wrong: \(summary.sourceLine)")
+    try runner.expect(summary.expandedBadgeText == "1 action", "badge wrong: \(summary.expandedBadgeText)")
 }
 
 runner.test("session-row: derives actionable display metadata") {

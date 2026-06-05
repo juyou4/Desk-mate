@@ -62,10 +62,10 @@ public struct IslandInteractionGeometry: Equatable, Sendable {
         let screenWidth = input.screenFrame.width
         let maxWidth = min(max(screenWidth * 0.38, 432), 520)
         let rows = CGFloat(min(max(input.activeCount, 1), 5))
-        let contentHeight = 86 + rows * 62
+        let contentHeight = 112 + rows * 72
         return CGSize(
             width: maxWidth,
-            height: min(max(contentHeight, 180), 380)
+            height: min(max(contentHeight, 190), 420)
         )
     }
 

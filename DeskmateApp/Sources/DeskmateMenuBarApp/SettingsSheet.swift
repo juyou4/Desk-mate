@@ -102,6 +102,18 @@ struct SettingsSheet: View {
                 }
             }
 
+            Section("Diagnostics") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(agentHealthSummary.menuText)
+                    Divider()
+                    Text(runtime.combinedIslandDiagnostics)
+                }
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
             if let error = fieldError {
                 Section {
                     Text(error)
@@ -121,7 +133,7 @@ struct SettingsSheet: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 320, height: 480)
+        .frame(width: 360, height: 560)
         .onAppear { loadFromStore() }
     }
 
@@ -201,5 +213,9 @@ struct SettingsSheet: View {
         #else
         return []
         #endif
+    }
+
+    private var agentHealthSummary: AgentHealthSummary {
+        AgentHealthSummary(sessions: runtime.sessions)
     }
 }

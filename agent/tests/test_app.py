@@ -1154,6 +1154,67 @@ async def test_hook_event_phase_presentation_reaches_island(
 
 
 @pytest.mark.asyncio
+async def test_stale_hook_reaper_closes_non_actionable_sessions(
+    short_socket_path: Path, tmp_path: Path
+) -> None:
+    from deskmate_agent.protocol.state import Priority
+
+    config = AppConfig(
+        socket_path=short_socket_path,
+        db_dir=tmp_path,
+        agent_runtime_scanner_enabled=False,
+        codex_app_server_enabled=False,
+        stale_hook_session_reaper_enabled=False,
+        stale_hook_session_ttl_s=0.1,
+    )
+    app = App(config)
+    runtime = await app.setup()
+    try:
+        runtime.session_store.upsert(
+            SessionInfo(
+                session_id="stale-tool",
+                title="Stale tool",
+                summary="searching",
+                state=SessionState.ACTIVE,
+                phase=SessionPhase.RUNNING_TOOL,
+                priority=Priority.P1,
+                created_at_ms=1,
+                updated_at_ms=1,
+                kind="hook_session",
+                source="codex",
+            )
+        )
+        runtime.session_store.upsert(
+            SessionInfo(
+                session_id="stale-approval",
+                title="Approval",
+                summary="allow command?",
+                state=SessionState.ACTIVE,
+                phase=SessionPhase.WAITING_FOR_APPROVAL,
+                priority=Priority.P0,
+                created_at_ms=1,
+                updated_at_ms=1,
+                kind="hook_session",
+                source="codex",
+            )
+        )
+
+        assert await app._reap_stale_hook_sessions() == 1
+
+        stale_tool = runtime.session_store.get("stale-tool")
+        stale_approval = runtime.session_store.get("stale-approval")
+        assert stale_tool is not None
+        assert stale_tool.state is SessionState.CLOSED
+        assert stale_tool.phase is SessionPhase.COMPLETED
+        assert stale_tool.closed_at_ms is not None
+        assert stale_approval is not None
+        assert stale_approval.state is SessionState.ACTIVE
+        assert stale_approval.phase is SessionPhase.WAITING_FOR_APPROVAL
+    finally:
+        await app.teardown()
+
+
+@pytest.mark.asyncio
 async def test_module_registration_queue_reaches_bridge_and_replays(
     short_socket_path: Path, tmp_path: Path
 ) -> None:

@@ -314,12 +314,20 @@ struct DeskmateMenuContent: View {
 
     private var diagnosticsSection: some View {
         DisclosureGroup {
-            Text(runtime.combinedIslandDiagnostics)
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 4)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(agentHealthSummary.menuText)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                Divider()
+                Text(runtime.combinedIslandDiagnostics)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.top, 4)
         } label: {
             Label("Island diagnostics", systemImage: "display")
                 .font(.caption)
@@ -361,6 +369,10 @@ struct DeskmateMenuContent: View {
         case .waitingForRetry: return .orange
         case .stopped: return .red
         }
+    }
+
+    private var agentHealthSummary: AgentHealthSummary {
+        AgentHealthSummary(sessions: runtime.sessions)
     }
 
     private var bridgeLabel: String {

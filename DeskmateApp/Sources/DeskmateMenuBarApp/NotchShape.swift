@@ -50,7 +50,7 @@ extension NotchShape {
     static let closedTopRadius: CGFloat = 6
     static let closedBottomRadius: CGFloat = 20
     static let openedTopRadius: CGFloat = 22
-    static let openedBottomRadius: CGFloat = 30
+    static let openedBottomRadius: CGFloat = 22
 
     static var closed: NotchShape {
         NotchShape(

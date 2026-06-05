@@ -26,7 +26,7 @@ public struct SessionRow: Equatable, Sendable, Codable {
 
     /// V10 L2-#4: orthogonal axis describing what kind of attention a
     /// session needs from the user *right now*.
-    public enum Phase: String, Equatable, Sendable, Codable {
+    public enum Phase: String, Equatable, Sendable, Codable, CaseIterable {
         case waitingForApproval = "waiting_for_approval"
         case waitingForAnswer = "waiting_for_answer"
         case thinking

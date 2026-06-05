@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
 from ..logging_setup import get_logger
 from ..protocol.actions import ActionTarget, InteractionAction, InteractionKind
+from ..protocol.intents import CompanionIntent, IntentKind
 from ..protocol.state import Priority
 from .info import SessionPhase, SessionState
 from .store import SessionStore
@@ -88,26 +89,28 @@ class SessionInteractionRouter:
         opener: Callable[[str], bool] = _default_opener,
         activator: Callable[[str], bool] = _default_activator,
         workspace_opener: Callable[[str, str], bool] = _default_workspace_opener,
+        intent_sink: Callable[[CompanionIntent], Awaitable[None]] | None = None,
     ) -> None:
         self._store = store
         self._clock = clock
         self._opener = opener
         self._activator = activator
         self._workspace_opener = workspace_opener
+        self._intent_sink = intent_sink
         self._handlers: dict[
-            InteractionKind, Callable[[InteractionAction], RouterResult]
+            InteractionKind, Callable[[InteractionAction], Awaitable[RouterResult]]
         ] = {
             InteractionKind.SESSION_JUMP: self._handle_jump,
             InteractionKind.QUESTION_ANSWER: self._handle_question_answer,
         }
 
-    def handle(self, action: InteractionAction) -> RouterResult:
+    async def handle(self, action: InteractionAction) -> RouterResult:
         if action.target is not ActionTarget.SESSION:
             return RouterResult(handled=False, effect="wrong_target")
         handler = self._handlers.get(action.kind)
         if handler is None:
             return RouterResult(handled=False, effect="unknown_kind")
-        result = handler(action)
+        result = await handler(action)
         _LOG.info(
             "sessions.router_handled",
             kind=action.kind.value,
@@ -121,7 +124,7 @@ class SessionInteractionRouter:
     # Handlers
     # ------------------------------------------------------------------
 
-    def _handle_jump(self, action: InteractionAction) -> RouterResult:
+    async def _handle_jump(self, action: InteractionAction) -> RouterResult:
         sid = action.payload.get("session_id")
         if not isinstance(sid, str) or not sid:
             return RouterResult(handled=False, effect="missing_session_id")
@@ -164,7 +167,7 @@ class SessionInteractionRouter:
             handled=True, effect="session.jump.accepted", session_id=sid
         )
 
-    def _handle_question_answer(self, action: InteractionAction) -> RouterResult:
+    async def _handle_question_answer(self, action: InteractionAction) -> RouterResult:
         sid = action.payload.get("session_id")
         if not isinstance(sid, str) or not sid:
             return RouterResult(handled=False, effect="missing_session_id")
@@ -175,6 +178,13 @@ class SessionInteractionRouter:
                 effect="missing_answer",
                 session_id=sid,
             )
+        # R2.6: reject answers exceeding 4096 characters
+        if len(answer.strip()) > 4096:
+            return RouterResult(
+                handled=False,
+                effect="answer_too_long",
+                session_id=sid,
+            )
         existing = self._store.get(sid)
         if existing is None:
             return RouterResult(
@@ -182,10 +192,19 @@ class SessionInteractionRouter:
                 effect="session.question_answer.unknown_id",
                 session_id=sid,
             )
+        # R2.5: phase guard — only act if session is waiting for answer
+        if existing.phase != SessionPhase.WAITING_FOR_ANSWER:
+            return RouterResult(
+                handled=True,
+                effect="session.question_answer.phase_mismatch",
+                session_id=sid,
+            )
         now_ms = self._clock()
         extras = {**(existing.extras or {})}
         extras["last_answer"] = answer.strip()
         extras["last_answer_at_ms"] = str(now_ms)
+        # R2.3: persist last_answer before phase write
+        # R2.2: transition phase to RUNNING
         self._store.upsert(
             existing.model_copy(
                 update={
@@ -198,6 +217,13 @@ class SessionInteractionRouter:
                 }
             )
         )
+        # R2.1: emit dismiss_island with last_question_surface_id
+        surface_id = existing.last_question_surface_id
+        if surface_id and self._intent_sink is not None:
+            await self._intent_sink(CompanionIntent(
+                kind=IntentKind.DISMISS_ISLAND,
+                payload={"id": surface_id},
+            ))
         return RouterResult(
             handled=True,
             effect="session.question_answer.accepted",

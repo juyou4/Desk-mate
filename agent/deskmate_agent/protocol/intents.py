@@ -23,6 +23,7 @@ class IntentKind(StrEnum):
     UPDATE_ISLAND = "update_island"
     DISMISS_ISLAND = "dismiss_island"
     UPDATE_DOMAIN_STATE = "update_domain_state"
+    REGISTER_MODULE = "register_module"
 
 
 class CompanionIntent(BaseModel):
@@ -34,4 +35,37 @@ class CompanionIntent(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
-__all__ = ["CompanionIntent", "IntentKind"]
+class IslandModuleSpec(BaseModel):
+    """Wire spec for a Swift-side island module registration."""
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    kind: str
+    title: str
+    priority: int = 50
+    activity_prefix: str | None = None
+    subtitle: str | None = None
+    image: str | None = None
+
+    def to_intent(self) -> CompanionIntent:
+        """Build the canonical ``register_module`` CompanionIntent."""
+
+        return CompanionIntent(
+            kind=IntentKind.REGISTER_MODULE,
+            payload=self.model_dump(exclude_none=True),
+        )
+
+
+def register_module_intent(spec: IslandModuleSpec) -> CompanionIntent:
+    """Convenience builder for external live-activity module registration."""
+
+    return spec.to_intent()
+
+
+__all__ = [
+    "CompanionIntent",
+    "IntentKind",
+    "IslandModuleSpec",
+    "register_module_intent",
+]

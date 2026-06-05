@@ -16,6 +16,11 @@ public enum IntentKind: String, Codable, Sendable, CaseIterable {
     case updateIsland = "update_island"
     case dismissIsland = "dismiss_island"
     case updateDomainState = "update_domain_state"
+    /// V10 polish #10: external live-activity registration. Lets an
+    /// agent register a custom claim-pattern + render descriptor at
+    /// runtime so kiro/codex/cursor can show a branded compact pill
+    /// without us shipping per-agent code.
+    case registerModule = "register_module"
     /// Forward-compat sentinel: Python may add new intent kinds that
     /// an older Swift client doesn't yet render. We decode them to
     /// ``.unknown`` so the dispatcher can silently drop them instead

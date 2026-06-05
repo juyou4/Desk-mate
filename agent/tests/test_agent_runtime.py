@@ -249,3 +249,37 @@ def test_cli_agents_keep_separate_rows_per_pid() -> None:
     assert len(statuses) == 2
     pids = {s.process_id for s in statuses}
     assert pids == {901, 902}
+
+
+# ---------------------------------------------------------------------------
+# Task 15.4: Unit tests for agent_runtime unobserved timer
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_codex_unobserved_after_30s():
+    """R11.1: codex process without events gets phase_source=unobserved after 30s."""
+    store = AgentRuntimeStore()
+    sessions = SessionStore()
+    ps_output = "12345 1 /opt/homebrew/bin/codex codex\n"
+    clock_ms = 1_000
+    scanner = AgentRuntimeScanner(
+        store,
+        sessions,
+        ps_provider=lambda: ps_output,
+        clock=lambda: clock_ms,
+    )
+
+    # First scan — records first_observed_ms, phase_source should be None
+    await scanner.scan_once()
+    s = sessions.get("runtime-codex-12345")
+    assert s is not None
+    assert s.phase_source is None  # not yet 30s
+
+    # Advance clock past 30s
+    clock_ms = 31_000
+    scanner._clock = lambda: clock_ms
+    await scanner.scan_once()
+    s = sessions.get("runtime-codex-12345")
+    assert s is not None
+    assert s.phase_source == "unobserved"

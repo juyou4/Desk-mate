@@ -67,13 +67,22 @@ from .intent_logger import IntentLogger
 from .island_notifications import IslandNotificationPublisher
 from .logging_setup import get_logger, trace_scope
 from .memory import CodingSessionStore, ProfileStore, SessionMemory
+from .module_registrations import (
+    ModuleRegistrationWatcher,
+    default_module_registrations_dir,
+)
 from .perception_deduper import PerceptionDeduper
 from .proactive import NudgeSelector, ProactiveEngine
 from .projector import DomainStateProjector
 from .projects import ProjectRegistry
 from .protocol.actions import InteractionAction, InteractionKind
 from .protocol.envelope import BridgeEnvelope, EnvelopeType
-from .protocol.intents import CompanionIntent, IntentKind
+from .protocol.intents import (
+    CompanionIntent,
+    IntentKind,
+    IslandModuleSpec,
+    register_module_intent,
+)
 from .protocol.state import BubbleKind, BubbleSpec, Priority, UserFocus
 from .reminders import Reminder, ReminderScheduler, ReminderStore
 from .sessions import (
@@ -159,6 +168,12 @@ class AppConfig:
     #: Directory queue consumed by the hook watcher. Defaults to
     #: ``$DESKMATE_HOOK_EVENTS_DIR`` or ``~/.deskmate/hook-events``.
     hook_events_dir: Path = field(default_factory=default_hook_events_dir)
+    #: Directory queue consumed by the external island module registration
+    #: watcher. Defaults to ``$DESKMATE_MODULE_REGISTRATIONS_DIR`` or
+    #: ``~/.deskmate/module-registrations``.
+    module_registrations_dir: Path = field(
+        default_factory=default_module_registrations_dir
+    )
     #: Passive IDE / agent process scanning. Production keeps this on;
     #: tests can disable it to avoid host-machine processes leaking into
     #: deterministic snapshots.
@@ -202,6 +217,7 @@ class AppRuntime:
     codex_app_server: CodexAppServerCoordinator
     claude_transcript_watcher: ClaudeTranscriptWatcher
     hook_event_watcher: HookEventWatcher
+    module_registration_watcher: ModuleRegistrationWatcher
     project_registry: ProjectRegistry
     degradation: DegradationController
     skill_registry: SkillRegistry
@@ -224,6 +240,8 @@ class App:
         self._llm_prewarm = llm_prewarm or _noop_prewarm
         self._runtime: AppRuntime | None = None
         self._bg_tasks: list[asyncio.Task[None]] = []
+        self._intent_sink: Callable[[CompanionIntent], Awaitable[None]] | None = None
+        self._registered_island_modules: dict[str, IslandModuleSpec] = {}
 
     # ------------------------------------------------------------------
     # Public lifecycle
@@ -305,6 +323,7 @@ class App:
             path=cfg.db_dir / "intents.jsonl",
             inner=_bridge_sink,
         )
+        self._intent_sink = intent_sink
 
         # Phase 13-v: 1s dwell keeps cmd-tab flicker from flashing the
         # pill; 2s grace lets brief Messages / Finder detours stay
@@ -446,19 +465,31 @@ class App:
         )
 
         session_store = SessionStore()
-        session_router = SessionInteractionRouter(session_store)
+        session_router = SessionInteractionRouter(
+            session_store,
+            intent_sink=intent_sink,
+        )
 
         reminder_store = ReminderStore()
         reminder_scheduler = ReminderScheduler(reminder_store, intent_sink)
 
         approval_store = ApprovalStore()
-        approval_router = ApprovalRouter(approval_store)
         approval_surface = ApprovalSurfacePublisher(approval_store, intent_sink)
 
         domain_projector = DomainStateProjector(
             approval_store=approval_store,
             session_store=session_store,
             intent_sink=intent_sink,
+        )
+        # island-polish-enhancements R1: ApprovalRouter now owns the
+        # close-loop emission (dismiss_island + session phase write +
+        # projector kick), so it needs the bridge sink, the live
+        # session store, and a handle to the projector built above.
+        approval_router = ApprovalRouter(
+            approval_store,
+            intent_sink=intent_sink,
+            session_store=session_store,
+            domain_projector=domain_projector,
         )
         # Phase 9 · §4: any controller-level change shows up in the
         # next ``UPDATE_DOMAIN_STATE`` intent so Swift can apply its
@@ -579,6 +610,7 @@ class App:
                     priority=phase_ui.priority,
                     detail=phase_ui.island_detail,
                     force=phase_ui.force_notification,
+                    surface_id=f"approval:{event.approval_id}" if event.approval_id else None,
                 )
             except RuntimeError:
                 pass
@@ -587,6 +619,14 @@ class App:
         hook_event_watcher = HookEventWatcher(
             cfg.hook_events_dir,
             _handle_hook_event,
+        )
+
+        async def _handle_module_registration(spec: IslandModuleSpec) -> None:
+            await self._handle_module_registration(spec)
+
+        module_registration_watcher = ModuleRegistrationWatcher(
+            cfg.module_registrations_dir,
+            _handle_module_registration,
         )
         agent_runtime_store = AgentRuntimeStore()
         # V10 runtime-phase-observers Requirement 4.8 — the reducer is
@@ -666,6 +706,7 @@ class App:
             codex_app_server=codex_app_server,
             claude_transcript_watcher=claude_transcript_watcher,
             hook_event_watcher=hook_event_watcher,
+            module_registration_watcher=module_registration_watcher,
             project_registry=project_registry,
             degradation=degradation,
             skill_registry=skill_registry,
@@ -691,6 +732,7 @@ class App:
             await rt.codex_app_server.start()
         await rt.claude_transcript_watcher.start()
         await rt.hook_event_watcher.start()
+        await rt.module_registration_watcher.start()
         try:
             await rt.bridge.serve_forever()
         finally:
@@ -712,6 +754,10 @@ class App:
             await rt.hook_event_watcher.stop()
         except Exception as exc:  # noqa: BLE001
             _LOG.warning("app.hook_event_watcher_stop_failed", error=str(exc))
+        try:
+            await rt.module_registration_watcher.stop()
+        except Exception as exc:  # noqa: BLE001
+            _LOG.warning("app.module_registration_watcher_stop_failed", error=str(exc))
         try:
             await rt.agent_runtime_scanner.stop()
         except Exception as exc:  # noqa: BLE001
@@ -769,6 +815,7 @@ class App:
         )
         await rt.bridge.send(BridgeEnvelope.of(EnvelopeType.AGENT_READY))
         rt.agent_ready_sent.set()
+        await self._replay_module_registrations()
 
     async def _on_client_disconnect(self) -> None:
         rt = self._runtime
@@ -821,6 +868,44 @@ class App:
         except Exception as exc:  # noqa: BLE001 — prewarm failure is never fatal
             _LOG.warning("app.prewarm_failed", error=str(exc))
 
+    async def _handle_module_registration(self, spec: IslandModuleSpec) -> None:
+        """Store and forward an external island module registration.
+
+        Registrations are intentionally sticky for the resident agent process:
+        if Swift disconnects and reconnects, ``_on_client_connect`` replays the
+        latest spec per id so external tools do not need to re-register.
+        """
+        self._registered_island_modules[spec.id] = spec
+        sink = self._intent_sink
+        if sink is None:
+            return
+        try:
+            await sink(register_module_intent(spec))
+        except RuntimeError:
+            return
+        except Exception as exc:  # noqa: BLE001
+            _LOG.warning(
+                "app.module_registration_forward_failed",
+                module_id=spec.id,
+                error=str(exc),
+            )
+
+    async def _replay_module_registrations(self) -> None:
+        sink = self._intent_sink
+        if sink is None or not self._registered_island_modules:
+            return
+        for spec in sorted(self._registered_island_modules.values(), key=lambda s: s.id):
+            try:
+                await sink(register_module_intent(spec))
+            except RuntimeError:
+                return
+            except Exception as exc:  # noqa: BLE001
+                _LOG.warning(
+                    "app.module_registration_replay_failed",
+                    module_id=spec.id,
+                    error=str(exc),
+                )
+
     def _handle_perf_metrics(self, payload: dict[str, Any]) -> None:
         """Log Swift-side §3.1 hard budget readings.
 
@@ -870,12 +955,12 @@ class App:
         # Dispatch on kind so each router owns its verbs regardless of
         # which surface originated the action (V10 L1-F).
         if action.kind is InteractionKind.PERMISSION_RESOLVE:
-            rt.approval_router.handle(action)
+            await rt.approval_router.handle(action)
         elif action.kind in {
             InteractionKind.SESSION_JUMP,
             InteractionKind.QUESTION_ANSWER,
         }:
-            result = rt.session_router.handle(action)
+            result = await rt.session_router.handle(action)
             if action.kind is InteractionKind.SESSION_JUMP and result.handled:
                 await self._handle_session_jump_result(result)
             elif action.kind is InteractionKind.QUESTION_ANSWER and result.handled:
@@ -888,6 +973,23 @@ class App:
                 source=action.source.value,
                 surface=action.payload.get("surface"),
             )
+            # When the user dismisses a reminder/notification bubble,
+            # also tear down the corresponding island notification_card
+            # so the surface store reverts to compact (and the island
+            # width recovers from the reminder-extended state).
+            reminder_id = action.payload.get("reminder_id")
+            surface_id = action.payload.get("surface_id")
+            dismiss_id = surface_id or reminder_id
+            if dismiss_id:
+                await self._send_bridge_envelope_best_effort(
+                    BridgeEnvelope.of(
+                        EnvelopeType.INTENT,
+                        {
+                            "kind": IntentKind.DISMISS_ISLAND.value,
+                            "payload": {"id": str(dismiss_id)},
+                        },
+                    )
+                )
         else:
             # V10 L1-F catch-all: every typed kind must surface as a
             # structured log line, never get silently dropped.
@@ -969,6 +1071,8 @@ class App:
                     approval_id="demo-approval",
                     prompt="Allow Deskmate to run the demo action?",
                     priority=Priority.P0,
+                    session_id=None,
+                    surface_id="approval:demo-approval",
                     created_at_ms=now_ms,
                     expires_at_ms=now_ms + 10 * 60 * 1000,
                     extras={"demo": True},
@@ -1033,6 +1137,16 @@ class App:
             rt.session_store.remove("demo-codex-session")
             with contextlib.suppress(RuntimeError):
                 await rt.build_status.on_external_dismiss()
+            # Generic dismiss to clear any stuck notification_card
+            await self._send_bridge_envelope_best_effort(
+                BridgeEnvelope.of(
+                    EnvelopeType.INTENT,
+                    {
+                        "kind": IntentKind.DISMISS_ISLAND.value,
+                        "payload": {},
+                    },
+                )
+            )
             await self._send_bridge_envelope_best_effort(
                 BridgeEnvelope.of(
                     EnvelopeType.INTENT,

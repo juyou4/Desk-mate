@@ -92,10 +92,14 @@ async def test_show_notification_omits_optional_fields_when_unset() -> None:
     publisher = _make_publisher(sink_log=sink)
     await publisher.show_notification(activity_id="bare")
     payload = sink[0].payload
+    # When no explicit surface_id is provided, the activity_id is
+    # used as a backwards-compatible fallback (R3 polish — see
+    # show_notification docstring).
     assert payload == {
         "surface": IslandSurfaceKind.NOTIFICATION_CARD.value,
         "activity_id": "bare",
         "priority": Priority.P2.value,
+        "surface_id": "bare",
     }
 
 
@@ -105,6 +109,101 @@ async def test_show_notification_rejects_empty_activity_id() -> None:
     publisher = _make_publisher(sink_log=sink)
     with pytest.raises(ValueError):
         await publisher.show_notification(activity_id="")
+
+
+# ---------------------------------------------------------------------------
+# R3 surface_id injection (island-polish-enhancements task 5.1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_provided_valid_surface_id_is_included_verbatim() -> None:
+    """R3.1/R3.2: An explicit ``surface_id`` (e.g. ``approval:42`` or
+    ``question:sess-1:7``) must land in the payload exactly as
+    given — the dismiss path matches against this byte-for-byte."""
+    sink: list[CompanionIntent] = []
+    publisher = _make_publisher(sink_log=sink)
+    outcome = await publisher.show_notification(
+        activity_id="hook-sess-1-waiting_for_answer",
+        session_id="sess-1",
+        priority=Priority.P1,
+        surface_id="question:sess-1:7",
+    )
+    assert outcome.emitted is True
+    payload = sink[0].payload
+    assert payload["surface_id"] == "question:sess-1:7"
+    # activity_id is still emitted alongside; surface_id wins as the
+    # close-loop dismiss target.
+    assert payload["activity_id"] == "hook-sess-1-waiting_for_answer"
+
+
+@pytest.mark.asyncio
+async def test_none_surface_id_falls_back_to_activity_id() -> None:
+    """Backward-compat: callers that haven't migrated yet (and
+    pass values like ``hook-sess-1-running``) keep working. The
+    activity_id is reused as the surface_id when it itself fits
+    the R3.6 grammar."""
+    sink: list[CompanionIntent] = []
+    publisher = _make_publisher(sink_log=sink)
+    outcome = await publisher.show_notification(
+        activity_id="hook-sess-1-running",
+        session_id="sess-1",
+    )
+    assert outcome.emitted is True
+    assert sink[0].payload["surface_id"] == "hook-sess-1-running"
+
+
+@pytest.mark.asyncio
+async def test_invalid_surface_id_too_long_is_rejected() -> None:
+    """R3.6/R3.7: a 129-char surface_id violates the length cap and
+    must drop the entire emission — not just strip the field."""
+    sink: list[CompanionIntent] = []
+    publisher = _make_publisher(sink_log=sink)
+    overlong = "a" * 129  # one past the 128-char ceiling
+    outcome = await publisher.show_notification(
+        activity_id="x",
+        surface_id=overlong,
+    )
+    assert outcome == NotificationOutcome(
+        emitted=False, suppressed_reason="invalid_surface_id"
+    )
+    assert sink == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_surface_id_special_chars_is_rejected() -> None:
+    """R3.6/R3.7: ``/``, spaces, or any character outside
+    ``[A-Za-z0-9:_-]`` violate the grammar and the publisher must
+    refuse to emit."""
+    sink: list[CompanionIntent] = []
+    publisher = _make_publisher(sink_log=sink)
+    outcome = await publisher.show_notification(
+        activity_id="x",
+        surface_id="approval:foo/bar baz",
+    )
+    assert outcome.emitted is False
+    assert outcome.suppressed_reason == "invalid_surface_id"
+    assert sink == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_activity_id_fallback_is_dropped_silently() -> None:
+    """When no explicit ``surface_id`` is provided and the
+    ``activity_id`` itself doesn't fit the grammar (e.g. contains
+    spaces or unicode), graceful degradation kicks in: the
+    notification still emits — just without a ``surface_id`` key
+    on the payload."""
+    sink: list[CompanionIntent] = []
+    publisher = _make_publisher(sink_log=sink)
+    outcome = await publisher.show_notification(
+        activity_id="bare with spaces",
+        session_id="sess-1",
+    )
+    assert outcome.emitted is True
+    assert len(sink) == 1
+    payload = sink[0].payload
+    assert "surface_id" not in payload
+    assert payload["activity_id"] == "bare with spaces"
 
 
 # ---------------------------------------------------------------------------
@@ -510,3 +609,61 @@ async def test_non_string_extras_dont_crash() -> None:
     )
     # No suppression because the claim is invalid → emit.
     assert outcome.emitted is True
+
+
+# ---------------------------------------------------------------------------
+# Task 5.3: Property test for SurfaceId dismiss matching (Python side)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dismiss_payload_uses_surface_id_format():
+    """Property 3 (Python side): dismiss targets use the same format as present.
+
+    This verifies the contract that ApprovalRouter emits dismiss with the same
+    surface_id that was stored on the Approval.
+
+    **Validates: Requirements R3.4, R3.5**
+    """
+    from deskmate_agent.approvals import Approval, ApprovalRouter, ApprovalStore
+    from deskmate_agent.projector import DomainStateProjector
+    from deskmate_agent.sessions import SessionStore
+
+    store = ApprovalStore()
+    store.add(
+        Approval(
+            approval_id="x1",
+            prompt="?",
+            created_at_ms=1,
+            surface_id="approval:x1",
+        )
+    )
+    emitted: list = []
+
+    async def sink(i):
+        emitted.append(i)
+
+    ss = SessionStore()
+    proj = DomainStateProjector(
+        approval_store=store, session_store=ss, intent_sink=sink
+    )
+    router = ApprovalRouter(
+        store, intent_sink=sink, session_store=ss, domain_projector=proj
+    )
+    from deskmate_agent.protocol.actions import (
+        ActionSource,
+        ActionTarget,
+        InteractionAction,
+        InteractionKind,
+    )
+
+    action = InteractionAction(
+        source=ActionSource.ISLAND,
+        target=ActionTarget.SYSTEM,
+        kind=InteractionKind.PERMISSION_RESOLVE,
+        payload={"approval_id": "x1", "allow": True},
+    )
+    await router.handle(action)
+    dismiss = [i for i in emitted if i.kind == IntentKind.DISMISS_ISLAND]
+    assert len(dismiss) == 1
+    assert dismiss[0].payload["id"] == "approval:x1"

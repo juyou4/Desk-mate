@@ -235,13 +235,14 @@ extension CompanionIntentDispatcher {
         register(kind: .presentIsland) { [weak store] intent in
             guard let store else { return }
             do {
-                let (kind, sessionId, activityId, detail, priority) =
+                let (kind, sessionId, activityId, detail, surfaceId, priority) =
                     try Self.decodePresentIsland(from: intent)
                 store.present(
                     kind: kind,
                     sessionId: sessionId,
                     activityId: activityId,
                     detail: detail,
+                    surfaceId: surfaceId,
                     priority: priority
                 )
             } catch {
@@ -251,9 +252,9 @@ extension CompanionIntentDispatcher {
         register(kind: .updateIsland) { [weak store] intent in
             guard let store else { return }
             do {
-                let (activityId, detail) =
+                let (activityId, detail, progress) =
                     try Self.decodeUpdateIsland(from: intent)
-                store.update(activityId: activityId, detail: detail)
+                store.update(activityId: activityId, detail: detail, progress: progress)
             } catch {
                 onDecodeError?(error)
             }
@@ -264,6 +265,89 @@ extension CompanionIntentDispatcher {
             let id = Self.decodeDismissIsland(from: intent)
             store.dismiss(id: id)
         }
+    }
+
+    /// V10 island polish #10: register a handler for
+    /// ``register_module`` intents. Decodes the spec, builds a
+    /// ``RegisteredIslandModule`` and applies it via ``apply``. The
+    /// runtime owns the module registry so this isolation is purely
+    /// at the dispatcher boundary — callers pass a closure that
+    /// performs the registry mutation on the main actor.
+    public func bindModuleRegistration(
+        apply: @escaping (RegisteredIslandModule) -> Void,
+        onDecodeError: ((Error) -> Void)? = nil
+    ) {
+        register(kind: .registerModule) { intent in
+            do {
+                let spec = try Self.decodeRegisterModule(from: intent)
+                let module = RegisteredIslandModule(spec: spec)
+                apply(module)
+            } catch {
+                onDecodeError?(error)
+            }
+        }
+    }
+
+    /// Decode a ``register_module`` intent payload into a
+    /// ``IslandModuleSpec``. Required keys: ``id``, ``kind``,
+    /// ``title``. Everything else is optional.
+    public static func decodeRegisterModule(
+        from intent: CompanionIntent
+    ) throws -> IslandModuleSpec {
+        guard let idValue = intent.payload["id"],
+              case .string(let id) = idValue, !id.isEmpty
+        else {
+            throw DecodingError.typeMismatch(
+                String.self,
+                .init(codingPath: [],
+                      debugDescription: "register_module missing 'id'")
+            )
+        }
+        guard let kindValue = intent.payload["kind"],
+              case .string(let kind) = kindValue, !kind.isEmpty
+        else {
+            throw DecodingError.typeMismatch(
+                String.self,
+                .init(codingPath: [],
+                      debugDescription: "register_module missing 'kind'")
+            )
+        }
+        guard let titleValue = intent.payload["title"],
+              case .string(let title) = titleValue, !title.isEmpty
+        else {
+            throw DecodingError.typeMismatch(
+                String.self,
+                .init(codingPath: [],
+                      debugDescription: "register_module missing 'title'")
+            )
+        }
+        var priority = 50
+        if case .int(let p) = intent.payload["priority"] ?? .null {
+            priority = p
+        } else if case .double(let p) = intent.payload["priority"] ?? .null {
+            priority = Int(p)
+        }
+        var activityPrefix: String? = nil
+        if case .string(let v) = intent.payload["activity_prefix"] ?? .null {
+            activityPrefix = v
+        }
+        var subtitle: String? = nil
+        if case .string(let v) = intent.payload["subtitle"] ?? .null {
+            subtitle = v
+        }
+        var image: String? = nil
+        if case .string(let v) = intent.payload["image"] ?? .null {
+            image = v
+        }
+        return IslandModuleSpec(
+            id: id,
+            priority: priority,
+            kind: kind,
+            activityPrefix: activityPrefix,
+            title: title,
+            subtitle: subtitle,
+            image: image
+        )
     }
 
     // MARK: - Typed payload decoders
@@ -278,6 +362,7 @@ extension CompanionIntentDispatcher {
         sessionId: String?,
         activityId: String?,
         detail: String?,
+        surfaceId: String?,
         priority: Priority
     ) {
         guard let surfaceValue = intent.payload["surface"],
@@ -304,17 +389,21 @@ extension CompanionIntentDispatcher {
         if case .string(let d) = intent.payload["detail"] ?? .null {
             detail = d
         }
+        var surfaceId: String? = nil
+        if case .string(let sid) = intent.payload["surface_id"] ?? .null {
+            surfaceId = sid
+        }
         var priority: Priority = .p2
         if case .string(let praw) = intent.payload["priority"] ?? .null,
            let p = Priority(rawValue: praw) {
             priority = p
         }
-        return (kind, sessionId, activityId, detail, priority)
+        return (kind, sessionId, activityId, detail, surfaceId, priority)
     }
 
     public static func decodeUpdateIsland(
         from intent: CompanionIntent
-    ) throws -> (activityId: String, detail: String?) {
+    ) throws -> (activityId: String, detail: String?, progress: Double?) {
         guard let raw = intent.payload["activity_id"],
               case .string(let aid) = raw,
               !aid.isEmpty
@@ -331,7 +420,13 @@ extension CompanionIntentDispatcher {
         if case .string(let d) = intent.payload["detail"] ?? .null {
             detail = d
         }
-        return (aid, detail)
+        var progress: Double? = nil
+        if case .double(let p) = intent.payload["progress"] ?? .null {
+            progress = p
+        } else if case .int(let i) = intent.payload["progress"] ?? .null {
+            progress = Double(i)
+        }
+        return (aid, detail, progress)
     }
 
     public static func decodeDismissIsland(

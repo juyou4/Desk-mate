@@ -37,3 +37,5 @@ logs/
 tmp/
 *.sqlite3
 *.sqlite3-journal
+.commit_msg.txt
+.commit2.txt

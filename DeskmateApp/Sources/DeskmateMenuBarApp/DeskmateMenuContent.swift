@@ -7,6 +7,7 @@ import DeskmateCore
 struct DeskmateMenuContent: View {
     @ObservedObject var runtime: DeskmateMenuBarRuntime
     @State private var messageDraft: String = ""
+    @State private var showSettings = false
     @FocusState private var inputFocused: Bool
 
     var body: some View {
@@ -41,6 +42,9 @@ struct DeskmateMenuContent: View {
         }
         .padding(12)
         .frame(width: 340)
+        .sheet(isPresented: $showSettings) {
+            SettingsSheet(runtime: runtime)
+        }
     }
 
     // MARK: - Sections
@@ -333,6 +337,14 @@ struct DeskmateMenuContent: View {
             Button("Poke pet") { runtime.clickPet() }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+            Button {
+                showSettings = true
+            } label: {
+                Image(systemName: "gearshape")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("Settings")
             Spacer()
             Button("Quit Deskmate") { runtime.quit() }
                 .buttonStyle(.plain)

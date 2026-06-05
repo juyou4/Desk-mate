@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from pathlib import Path
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from deskmate_agent.protocol.intents import CompanionIntent, IntentKind
 from deskmate_agent.skills import BuildStatusSkill, BuildStatusWatcher
@@ -104,6 +107,69 @@ async def test_progress_clamps_out_of_range_values(
     # -0.5 → 0%, 2.0 → 100%
     assert captured[1].payload["detail"] == "🔨 make · 0%"
     assert captured[2].payload["detail"] == "🔨 make · 100%"
+
+
+@pytest.mark.asyncio
+async def test_progress_payload_includes_numeric_progress_field(
+    sink, captured
+) -> None:
+    """R4.6: numeric ``progress`` is published alongside ``detail``."""
+    skill = BuildStatusSkill(sink)
+    await skill.on_build_start("make")
+    await skill.on_build_progress("make", 0.5)
+    update = captured[1]
+    assert update.kind is IntentKind.UPDATE_ISLAND
+    assert update.payload["progress"] == 0.5
+    assert update.payload["detail"] == "🔨 make · 50%"
+
+
+@pytest.mark.asyncio
+async def test_progress_payload_clamps_above_one_to_one(
+    sink, captured
+) -> None:
+    """R4.6: values above 1.0 clamp to 1.0 in the payload."""
+    skill = BuildStatusSkill(sink)
+    await skill.on_build_start("make")
+    await skill.on_build_progress("make", 1.5)
+    assert captured[1].payload["progress"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_progress_payload_clamps_below_zero_to_zero(
+    sink, captured
+) -> None:
+    """R4.6: negative values clamp to 0.0 in the payload."""
+    skill = BuildStatusSkill(sink)
+    await skill.on_build_start("make")
+    await skill.on_build_progress("make", -0.3)
+    assert captured[1].payload["progress"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_progress_payload_omits_field_when_nan(
+    sink, captured
+) -> None:
+    """R4.7: NaN inputs cause the ``progress`` field to be omitted."""
+    skill = BuildStatusSkill(sink)
+    await skill.on_build_start("make")
+    await skill.on_build_progress("make", float("nan"))
+    update = captured[1]
+    assert update.kind is IntentKind.UPDATE_ISLAND
+    assert "progress" not in update.payload
+    assert "detail" in update.payload
+
+
+@pytest.mark.asyncio
+async def test_progress_detail_keeps_percent_for_backward_compat(
+    sink, captured
+) -> None:
+    """R4.6: detail string keeps the percent suffix unchanged."""
+    skill = BuildStatusSkill(sink)
+    await skill.on_build_start("pytest")
+    await skill.on_build_progress("pytest", 0.42)
+    update = captured[1]
+    assert update.payload["detail"] == "🔨 pytest · 42%"
+    assert update.payload["progress"] == pytest.approx(0.42)
 
 
 @pytest.mark.asyncio
@@ -509,3 +575,32 @@ def test_cli_today_human_readable_emits_per_ide_lines(
     assert "Today: 1h 5m" in out
     assert "Zed" in out
     assert "1h 5m" in out
+
+
+@pytest.mark.asyncio
+@settings(max_examples=50)
+@given(
+    raw_progress=st.one_of(
+        st.floats(allow_nan=True, allow_infinity=True), st.none()
+    )
+)
+async def test_progress_always_in_range_or_absent(raw_progress):
+    """Property 4: emitted progress ∈ [0,1] or absent.
+
+    **Validates: Requirements R4.6, R4.7**
+    """
+    emitted: list = []
+
+    async def sink(intent):
+        emitted.append(intent)
+
+    skill = BuildStatusSkill(sink)
+    await skill.on_build_start("t")
+    if raw_progress is not None:
+        await skill.on_build_progress("t", raw_progress)
+    for intent in emitted:
+        if "progress" in intent.payload:
+            p = intent.payload["progress"]
+            assert 0.0 <= p <= 1.0
+            assert not math.isnan(p)
+            assert not math.isinf(p)

@@ -17,7 +17,7 @@ from .character_pack import (
     StateFrames,
 )
 from .envelope import BridgeEnvelope, EnvelopeType, new_trace_id
-from .intents import CompanionIntent, IntentKind
+from .intents import CompanionIntent, IntentKind, IslandModuleSpec, register_module_intent
 from .state import (
     AgentMood,
     BubbleAction,
@@ -57,6 +57,7 @@ __all__ = [
     "InteractionKind",
     "IslandSurfaceKind",
     "IslandSurfaceState",
+    "IslandModuleSpec",
     "MenuBarState",
     "NestBehaviorPolicy",
     "PetAnchor",
@@ -67,4 +68,5 @@ __all__ = [
     "StateFrames",
     "UserFocus",
     "new_trace_id",
+    "register_module_intent",
 ]

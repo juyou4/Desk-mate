@@ -133,6 +133,7 @@ class AgentEventReducer:
                     prompt=event.prompt or event.summary or "Agent is waiting for approval.",
                     priority=Priority.P0,
                     session_id=event.session_id,
+                    surface_id=f"approval:{approval_id}",
                     created_at_ms=event.ts_ms,
                     extras=_extras(event),
                 )

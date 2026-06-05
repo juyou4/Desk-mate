@@ -1,6 +1,7 @@
 #if canImport(AppKit)
 import AppKit
 import Combine
+import CoreGraphics
 import QuartzCore
 import SwiftUI
 import DeskmateCore
@@ -86,8 +87,14 @@ final class IslandWindowController {
         if runtime.degradationPolicy.islandOrderOut { return }
 
         guard window == nil else { return }
+        // V11 architecture polish: ViewModel that collapses the
+        // runtime's many @Published fields into IslandStatus +
+        // IslandContent. Owned by the controller for the lifetime
+        // of the panel so SwiftUI doesn't recreate it on every
+        // resize.
+        let viewModel = IslandViewModel(runtime: runtime)
         let host = IslandHostingView(
-            rootView: IslandOverlay(runtime: runtime),
+            rootView: IslandOverlay(runtime: runtime, viewModel: viewModel),
             runtime: runtime
         )
         host.translatesAutoresizingMaskIntoConstraints = true
@@ -111,11 +118,13 @@ final class IslandWindowController {
         // honours this for borderless panels at ``.statusBar``
         // level.
         w.sharingType = .none
-        // ``.statusBar`` sits above menu bar items so the pill remains
-        // visible when the user pulls down the menu bar; this is the
-        // same level macOS uses for system dialogs like the volume
-        // HUD.
-        w.level = .statusBar
+        // V10 island polish #1 (MioIsland-inspired): start at the
+        // collapsed level. ``resizeForCurrentState`` will elevate to
+        // ``.popUpMenu`` whenever the island opens. Sitting at
+        // ``.mainMenu + 3`` keeps the pill above the menu bar
+        // background but below status bar items so clicks reach the
+        // system menus.
+        w.level = .mainMenu + 3
         // Float across Spaces + fullscreen apps; don't try to own any
         // Mission Control real estate.
         w.collectionBehavior = [
@@ -134,6 +143,11 @@ final class IslandWindowController {
         w.contentView = host
 
         positionAtTopCenter(window: w)
+        // V10 polish (NotchDrop-inspired): slide the panel down from
+        // above the screen on first appearance instead of just popping
+        // in. Uses NSAnimationContext on setFrame; the visible content
+        // animation is left to SwiftUI's built-in spring on the surface.
+        performInitialSlideIn(window: w)
         w.orderFrontRegardless()
 
         self.window = w
@@ -196,13 +210,53 @@ final class IslandWindowController {
         guard islandCancellable == nil else { return }
         islandCancellable = runtime.$island
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.resizeForCurrentState() }
+            .sink { [weak self] change in
+                guard let self else { return }
+                // R10: Emit feedback on notification_card entry
+                if let change,
+                   change.state.kind == .notificationCard,
+                   change.transition == .slideIn || change.transition == .morph {
+                    self.emitFeedback(priority: change.priority)
+                }
+                self.resizeForCurrentState()
+            }
         sessionsCancellable = runtime.$sessions
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.resizeForCurrentState() }
         approvalsCancellable = runtime.$approvals
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.resizeForCurrentState() }
+    }
+
+    // MARK: - Feedback (R10)
+
+    /// R10: Emit haptic and optional audio feedback for high-salience events.
+    /// Only P0 and P1 notification_card entries trigger feedback; dismissals
+    /// do not (R10.5). Skipped entirely when degradation >= 4 (R10.4).
+    private func emitFeedback(priority: Priority) {
+        // R10.4: No feedback when degradation >= 4
+        guard runtime.degradationPolicy.level < DegradationPolicy.levelHideHUD else { return }
+        // R10.1: Only P0 and P1 trigger feedback
+        guard priority == .p0 || priority == .p1 else { return }
+
+        // Haptic feedback (R10.1, R10.7: skip if hardware unavailable)
+        NSHapticFeedbackManager.defaultPerformer.perform(
+            .levelChange,
+            performanceTime: .now
+        )
+
+        // Audio feedback (R10.2)
+        let prefs = runtime.topSurfaceCustomization.current.feedback
+        if prefs.audio {
+            // V10 #9: when audio is enabled, fall back to "Tink" if
+            // the user hasn't picked a specific sound. Tink is built
+            // into macOS so the lookup is guaranteed to succeed.
+            let name = prefs.audioName?.trimmingCharacters(in: .whitespaces).isEmpty == false
+                ? prefs.audioName!
+                : "Tink"
+            NSSound(named: NSSound.Name(name))?.play()
+        }
+        // R10.6: If audioName doesn't resolve, haptic still fired above — no error surfaced
     }
 
     /// React to a policy change. Visible to tests so they can drive
@@ -224,34 +278,59 @@ final class IslandWindowController {
     /// the physical notch.
     private func positionAtTopCenter(window w: NSPanel) {
         guard let screen = targetScreen() else { return }
-        let size = panelSize(for: screen)
+        let size = panelSize(for: screen, forceExpanded: runtime.isIslandExpanded)
+        let maxWidth = panelSize(for: screen, forceExpanded: true).width
         let rect = NSRect(
-            x: screen.frame.midX - size.width / 2,
+            x: screen.frame.midX - maxWidth / 2,
             y: screen.frame.maxY - size.height,
-            width: size.width,
+            width: maxWidth,
             height: size.height
         )
         w.setFrame(rect, display: true)
     }
 
+    /// V10 polish: NotchDrop-style slide-in. Off-screen above the
+    /// notch, then animates down to the docked y position over 0.45s.
+    /// Run once on initial install so users see the pill "drop"
+    /// instead of pop. Uses NSAnimationContext directly because
+    /// SwiftUI's animation only kicks in once the view is mounted.
+    private func performInitialSlideIn(window w: NSPanel) {
+        guard let screen = targetScreen() else { return }
+        let finalFrame = w.frame
+        // Start position: panel pushed up so it's just above the
+        // visible top of the screen.
+        let startFrame = NSRect(
+            x: finalFrame.origin.x,
+            y: screen.frame.maxY,
+            width: finalFrame.width,
+            height: finalFrame.height
+        )
+        w.setFrame(startFrame, display: false)
+        DispatchQueue.main.async {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.45
+                ctx.timingFunction = CAMediaTimingFunction(
+                    controlPoints: 0.16, 1.0, 0.3, 1.0
+                ) // easeOutExpo — boring.notch fallback curve
+                w.animator().setFrame(finalFrame, display: true)
+            }
+        }
+    }
+
     private func resizeForCurrentState() {
         guard let w = window,
-              let host = w.contentView as? IslandHostingView<IslandOverlay>
+              w.contentView is IslandHostingView<IslandOverlay>
         else { return }
 
-        // V10 island polish: the panel's AppKit frame tracks the
-        // SwiftUI ``NotchShape`` exactly — we no longer leave the
-        // panel pinned at expanded size while the surface is
-        // closed (which made hit-testing leak into the surrounding
-        // notch area). The branch that used to do
-        // ``host.frame = panelFrame(forceExpanded: true)`` while the
-        // window was still expanded created a brief frame where
-        // the AppKit panel and the SwiftUI surface disagreed —
-        // dropping it removes that visual stutter.
         let expanded = runtime.isIslandExpanded
         applyPanelFrame(forceExpanded: expanded, animated: true)
-        host.frame = panelFrame(forceExpanded: expanded)
         w.ignoresMouseEvents = !expanded
+        // V10 island polish #1 (MioIsland-inspired): switch window
+        // level based on collapsed/opened. When collapsed we sit just
+        // above the menu bar background but BELOW menu bar items so
+        // status bar clicks reach the system. When opened we elevate
+        // above everything so buttons inside the panel are reachable.
+        w.level = expanded ? .popUpMenu : (.mainMenu + 3)
         publishDiagnostics()
     }
 
@@ -277,9 +356,40 @@ final class IslandWindowController {
         if mode == .forceFlat {
             return NSScreen.main ?? NSScreen.screens.first
         }
+
+        // R9.3: Check preferredScreenId first — if the user pinned
+        // the island to a specific display via the settings sheet,
+        // honour that choice as long as the display is connected.
+        if let preferredId = runtime.topSurfaceCustomization.current.preferredScreenId,
+           !preferredId.isEmpty {
+            if let match = NSScreen.screens.first(where: { stableScreenId(for: $0) == preferredId }) {
+                return match
+            }
+            // R9.4: Preferred screen not connected — fall through to
+            // the existing notch → main → first fallback chain.
+        }
+
+        // Existing fallback: notched screen → main screen → first screen
         return NSScreen.screens.first(where: { $0.deskmateHasPhysicalNotch })
             ?? NSScreen.main
             ?? NSScreen.screens.first
+    }
+
+    /// Returns a hardware-stable screen identifier using
+    /// ``CGDisplayCreateUUIDFromDisplayID``. This UUID survives
+    /// hot-plug, sleep/wake cycles, and process relaunches — making
+    /// it suitable for persisting a user's preferred target screen.
+    /// R9.1, R9.3
+    private func stableScreenId(for screen: NSScreen) -> String? {
+        guard let screenNumber = screen.deviceDescription[
+            NSDeviceDescriptionKey("NSScreenNumber")
+        ] as? CGDirectDisplayID else {
+            return nil
+        }
+        guard let uuid = CGDisplayCreateUUIDFromDisplayID(screenNumber) else {
+            return nil
+        }
+        return CFUUIDCreateString(nil, uuid.takeUnretainedValue()) as String
     }
 
     private func panelSize(for screen: NSScreen, forceExpanded: Bool? = nil) -> CGSize {
@@ -335,35 +445,30 @@ final class IslandWindowController {
               let host = w.contentView as? IslandHostingView<IslandOverlay>
         else { return }
         let size = panelSize(for: screen, forceExpanded: forceExpanded)
+        // Pin panel x to the maximum (expanded) width so the panel
+        // doesn't shift horizontally when reminder/notification
+        // arrives. Panel width still follows state so AppKit only
+        // animates dimensions that actually change.
+        let maxWidth = panelSize(for: screen, forceExpanded: true).width
         let rect = NSRect(
-            x: screen.frame.midX - size.width / 2,
+            x: screen.frame.midX - maxWidth / 2,
             y: screen.frame.maxY - size.height,
-            width: size.width,
+            width: maxWidth,
             height: size.height
         )
-        host.frame = NSRect(origin: .zero, size: size)
-        // V10 island polish: animate the AppKit panel frame so the
-        // surrounding panel grows/shrinks in sync with the SwiftUI
-        // ``NotchShape`` instead of snapping a frame ahead of (or
-        // behind) the SwiftUI animation. Asymmetric durations
-        // mirror boring.notch / MioIsland — opening is snappier
-        // (0.42 s) and closing is slightly slower (0.45 s, with
-        // damping=1.0 in SwiftUI) so the close lands without a
-        // bounce.
+        host.frame = NSRect(origin: .zero, size: rect.size)
         let duration = Self.tuning.panelFrameDuration(
             forceExpanded: forceExpanded, animated: animated
         )
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = duration
-            context.timingFunction = CAMediaTimingFunction(
-                name: forceExpanded ? .easeOut : .easeInEaseOut
-            )
-            context.allowsImplicitAnimation = animated
-            if animated && duration > 0 {
+        if animated && duration > 0 {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = duration
+                context.timingFunction = CAMediaTimingFunction(name: .default)
+                context.allowsImplicitAnimation = true
                 w.animator().setFrame(rect, display: true)
-            } else {
-                w.setFrame(rect, display: true)
             }
+        } else {
+            w.setFrame(rect, display: true)
         }
     }
 
@@ -437,6 +542,7 @@ final class IslandWindowController {
         applyPanelFrame(forceExpanded: expanded, animated: false)
         host.frame = panelFrame(forceExpanded: expanded)
         w.ignoresMouseEvents = !expanded
+        w.level = expanded ? .popUpMenu : (.mainMenu + 3)
         publishDiagnostics()
     }
 
@@ -447,8 +553,8 @@ final class IslandWindowController {
         localMouseMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.mouseMoved, .leftMouseDown, .rightMouseDown, .otherMouseDown]
         ) { [weak self] event in
-            self?.handleMouseEvent(event, isGlobal: false)
-            return event
+            guard let self else { return event }
+            return self.handleLocalMouseEvent(event) ? nil : event
         }
         globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.mouseMoved, .leftMouseDown, .rightMouseDown, .otherMouseDown]
@@ -474,6 +580,19 @@ final class IslandWindowController {
         globalMouseMonitor = nil
     }
 
+    private func handleLocalMouseEvent(_ event: NSEvent) -> Bool {
+        guard window != nil else { return false }
+        if event.type == .mouseMoved {
+            handleMouseEvent(event, isGlobal: false)
+            return false
+        }
+        if consumeExpandedPassthroughClick(event) {
+            return true
+        }
+        handleMouseEvent(event, isGlobal: false)
+        return false
+    }
+
     private func handleMouseEvent(_ event: NSEvent, isGlobal: Bool) {
         guard window != nil else { return }
         if event.type == .mouseMoved {
@@ -484,6 +603,29 @@ final class IslandWindowController {
             return
         }
         handleClick(at: NSEvent.mouseLocation)
+    }
+
+    private func consumeExpandedPassthroughClick(_ event: NSEvent) -> Bool {
+        guard runtime.isIslandExpanded,
+              let w = window,
+              event.window === w,
+              let localPoint = panelLocalPoint(for: NSEvent.mouseLocation, margin: 0),
+              let geometry = geometryForCurrentWindow(),
+              geometry.shouldPassthroughExpandedClick(localPoint: localPoint)
+        else { return false }
+
+        runtime.closeIslandSessionList(source: .island)
+        w.ignoresMouseEvents = true
+        w.level = .mainMenu + 3
+        repostPassthroughClick(event)
+        return true
+    }
+
+    private func repostPassthroughClick(_ event: NSEvent) {
+        guard let cgEvent = event.cgEvent?.copy() else { return }
+        DispatchQueue.main.async {
+            cgEvent.post(tap: .cghidEventTap)
+        }
     }
 
     private func updateHoverState(for screenPoint: NSPoint) {
@@ -524,6 +666,13 @@ final class IslandWindowController {
     }
 
     private func scheduleHoverOpen() {
+        // R5.5: If a SneakPeek/transient is active, promote immediately
+        // on hover instead of scheduling the normal hover-open delay.
+        if runtime.shell.islandSurface.isTransientActive {
+            runtime.shell.islandSurface.promoteSneakPeek()
+            runtime.openIslandSessionList()
+            return
+        }
         guard !runtime.isIslandExpanded else { return }
         // Idempotent: an in-flight timer is reused so the user
         // doesn't pay an extra 200 ms whenever the mouse twitches
@@ -619,9 +768,14 @@ private final class IslandHostingView<Content: View>: NSHostingView<Content> {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        guard let runtime,
-              interactionRect(for: runtime, in: bounds).contains(point)
-        else { return nil }
+        guard let runtime else { return nil }
+        let rect: NSRect
+        if runtime.isIslandExpanded {
+            rect = interactionRect(for: runtime, in: bounds)
+        } else {
+            rect = IslandInteractionGeometry.collapsedHitBandRect(in: bounds)
+        }
+        guard rect.contains(point) else { return nil }
         return super.hitTest(point) ?? self
     }
 
@@ -634,11 +788,6 @@ private final class IslandHostingView<Content: View>: NSHostingView<Content> {
         for runtime: DeskmateMenuBarRuntime,
         in bounds: NSRect
     ) -> NSRect {
-        // V10 I7: respect the runtime's hardware-notch override so
-        // hit-testing tracks the geometry path. If the user pinned
-        // ``.forceFlat`` we synthesize a 224×28 floating-bar surface
-        // (matching ``IslandWindowController.geometry``); otherwise
-        // we read the physical notch like before.
         let mode = runtime.topSurfaceCustomization.current.hardwareNotchMode
         let screen: NSScreen?
         let notchSize: CGSize
@@ -661,7 +810,21 @@ private final class IslandHostingView<Content: View>: NSHostingView<Content> {
             isExpanded: runtime.isIslandExpanded,
             activeCount: max(runtime.sessions.count, runtime.approvals.count)
         ))
-        return geometry.surfaceRectInPanel
+        // Panel is always at expanded size. The surface rect must be
+        // positioned relative to the expanded panel, not the compact one.
+        let expandedPanelSize = geometry.panelSize
+        let surfaceSize = geometry.surfaceSize
+        // Surface is centered horizontally in the panel, pinned to top.
+        let surfaceX = (expandedPanelSize.width - surfaceSize.width) / 2
+        let surfaceY = expandedPanelSize.height - surfaceSize.height
+        let surfaceRect = NSRect(
+            x: surfaceX,
+            y: surfaceY,
+            width: surfaceSize.width,
+            height: surfaceSize.height
+        )
+        // Expand the hit area slightly for easier targeting
+        return surfaceRect.insetBy(dx: -18, dy: -8)
     }
 
     private func hasCompactPresence(_ runtime: DeskmateMenuBarRuntime) -> Bool {

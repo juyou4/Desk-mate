@@ -31,6 +31,7 @@ whether the user is "already there".
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
@@ -51,6 +52,23 @@ PerceptionProvider = Callable[[], PerceptionSnapshot | None]
 # touches one place).
 EXTRA_FRONTMOST_BUNDLE_ID = "frontmost_bundle_id"
 EXTRA_FRONTMOST_WINDOW_SUBSTRING = "frontmost_window_substring"
+
+# Island-polish-enhancements R3.6: surface_id wire-format guard.
+# Length 1..128, ASCII letters/digits/`:_-` only. Compiled once at
+# module load so the validation hot path is a single match call.
+_SURFACE_ID_RE = re.compile(r"^[A-Za-z0-9:_-]{1,128}$")
+
+
+def _is_valid_surface_id(s: str) -> bool:
+    """Return True iff ``s`` matches the R3.6 surface_id grammar.
+
+    Length 1..128, ASCII letters/digits/`:`/`_`/`-` only. Anything
+    else (empty, too long, unicode, whitespace, punctuation outside
+    the allowed set) returns False.
+    """
+    if not isinstance(s, str):
+        return False
+    return _SURFACE_ID_RE.match(s) is not None
 
 
 @dataclass(frozen=True)
@@ -158,6 +176,7 @@ class IslandNotificationPublisher:
         priority: Priority = Priority.P2,
         detail: str | None = None,
         force: bool = False,
+        surface_id: str | None = None,
     ) -> NotificationOutcome:
         """Emit a ``notification_card`` PRESENT_ISLAND intent.
 
@@ -165,9 +184,32 @@ class IslandNotificationPublisher:
         the suppression check — used for genuinely-urgent surfaces
         (P0 approvals, security prompts) where user attention is
         required regardless of where they're looking.
+
+        ``surface_id`` (R3) is the stable identifier used by the
+        close-loop dismiss path; callers pass values like
+        ``approval:<id>`` or ``question:<sid>:<seq>``. When the
+        caller provides one, it is validated against the R3.6
+        grammar and a malformed value rejects the emission entirely
+        (R3.7). When ``surface_id`` is None, ``activity_id`` is used
+        as a backwards-compatible fallback so existing call sites
+        (``hook-{session_id}-{phase}`` and friends) keep working;
+        if even the fallback fails validation we emit without a
+        ``surface_id`` rather than dropping the notification.
         """
         if not activity_id:
             raise ValueError("activity_id must be non-empty")
+
+        # R3.7 — explicit surface_id must conform to the grammar.
+        if surface_id is not None and not _is_valid_surface_id(surface_id):
+            _LOGGER.warning(
+                "island_notification.invalid_surface_id",
+                activity_id=activity_id,
+                session_id=session_id,
+                surface_id=surface_id,
+            )
+            return NotificationOutcome(
+                emitted=False, suppressed_reason="invalid_surface_id"
+            )
 
         if not force and session_id is not None and session_id in self._silenced:
             # Restored-but-silent path. Logged at info because a
@@ -203,6 +245,23 @@ class IslandNotificationPublisher:
             payload["session_id"] = session_id
         if detail is not None:
             payload["detail"] = detail
+
+        # R3.1/R3.2 — inject the surface identifier. Caller-provided
+        # values have already been validated above; the activity_id
+        # fallback is validated here and dropped on failure (graceful
+        # degradation: emit without surface_id rather than swallow
+        # the whole notification, since the upstream caller didn't
+        # opt into the new contract).
+        if surface_id is not None:
+            payload["surface_id"] = surface_id
+        elif _is_valid_surface_id(activity_id):
+            payload["surface_id"] = activity_id
+        else:
+            _LOGGER.warning(
+                "island_notification.activity_id_unfit_for_surface_id",
+                activity_id=activity_id,
+                session_id=session_id,
+            )
 
         await self._sink(
             CompanionIntent(

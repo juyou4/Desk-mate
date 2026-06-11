@@ -132,6 +132,19 @@ def test_demo_trigger_action_is_typed() -> None:
     assert data["target"] == "system"
 
 
+def test_task_control_action_is_typed() -> None:
+    act = InteractionAction(
+        source=ActionSource.MENU_BAR,
+        target=ActionTarget.SKILL,
+        kind=InteractionKind.TASK_ADVANCE,
+        payload={"task_id": "task-7"},
+    )
+    data = json.loads(act.model_dump_json())
+    assert data["kind"] == "task.advance"
+    assert data["target"] == "skill"
+    assert data["payload"] == {"task_id": "task-7"}
+
+
 # ---------------------------------------------------------------------------
 # CompanionIntent (L1-C)
 # ---------------------------------------------------------------------------

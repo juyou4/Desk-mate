@@ -69,6 +69,56 @@ final class ApprovalRowTests: XCTestCase {
         XCTAssertEqual(row.decision, .unknown)
     }
 
+    func testDecodeExtrasAndDeriveApprovalDetailLine() throws {
+        let raw = #"""
+        {
+          "approval_id": "ap-6",
+          "prompt": "Allow edit?",
+            "extras": {
+              "tool_name": "Edit",
+              "file_path": "/tmp/work/App.swift",
+              "command": "python scripts/update.py",
+              "approval_preview": "cmd: python scripts/update.py",
+              "risk_level": "medium",
+              "risk_summary": "Modifies a source file.",
+              "ignored": 42
+            }
+        }
+        """#.data(using: .utf8)!
+        let row = try decoder.decode(ApprovalRow.self, from: raw)
+        XCTAssertEqual(row.extras["tool_name"], "Edit")
+        XCTAssertEqual(row.toolName, "Edit")
+        XCTAssertEqual(row.toolAction, "Edit")
+        XCTAssertEqual(row.filePath, "/tmp/work/App.swift")
+        XCTAssertEqual(row.command, "python scripts/update.py")
+        XCTAssertEqual(row.approvalPreview, "cmd: python scripts/update.py")
+        XCTAssertEqual(row.riskLevel, "medium")
+        XCTAssertEqual(row.riskSummary, "Modifies a source file.")
+        XCTAssertEqual(row.detailLine, "cmd: python scripts/update.py")
+        XCTAssertNil(row.extras["ignored"])
+    }
+
+    func testApprovalDetailLineUsesToolAndSuggestionReasons() {
+        let tool = ApprovalRow(
+            approvalId: "tool",
+            extras: [
+                "tool_action": "deskmate_open_app",
+                "tool_target": "Calendar"
+            ]
+        )
+        XCTAssertEqual(tool.detailLine, "tool: deskmate_open_app -> Calendar")
+
+        let memory = ApprovalRow(
+            approvalId: "memory",
+            extras: [
+                "kind": "memory_suggestion",
+                "memory_reason": "Useful for coding help."
+            ]
+        )
+        XCTAssertEqual(memory.approvalKind, "memory_suggestion")
+        XCTAssertEqual(memory.detailLine, "Useful for coding help.")
+    }
+
     func testRoundTripKeepsSnakeCase() throws {
         let row = ApprovalRow(
             approvalId: "ap-x",
@@ -80,7 +130,8 @@ final class ApprovalRowTests: XCTestCase {
             bubbleId: "b-x",
             createdAtMs: 100,
             expiresAtMs: 1000,
-            resolvedAtMs: 500
+            resolvedAtMs: 500,
+            extras: ["tool_name": "Bash"]
         )
         let data = try encoder.encode(row)
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -88,6 +139,7 @@ final class ApprovalRowTests: XCTestCase {
         XCTAssertNotNil(json?["created_at_ms"])
         XCTAssertNotNil(json?["expires_at_ms"])
         XCTAssertNotNil(json?["session_id"])
+        XCTAssertEqual((json?["extras"] as? [String: String])?["tool_name"], "Bash")
         XCTAssertNil(json?["approvalId"])
     }
 }

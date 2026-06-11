@@ -11,17 +11,39 @@ import DeskmateCore
 final class PetWindowController {
     private let runtime: DeskmateMenuBarRuntime
     private var window: NSWindow?
+    private var dragStartFrame: NSRect?
+    private let edgeMargin: CGFloat = 16
+    private let defaults: UserDefaults
 
-    init(runtime: DeskmateMenuBarRuntime) {
+    private enum DefaultsKey {
+        static let originX = "deskmate.petWindow.origin.x"
+        static let originY = "deskmate.petWindow.origin.y"
+    }
+
+    init(runtime: DeskmateMenuBarRuntime, defaults: UserDefaults = .standard) {
         self.runtime = runtime
+        self.defaults = defaults
     }
 
     func install() {
         guard window == nil else { return }
-        let host = NSHostingView(rootView: PetOverlay(runtime: runtime))
-        host.frame = NSRect(x: 0, y: 0, width: 300, height: 260)
+        let host = NSHostingView(
+            rootView: PetOverlay(
+                runtime: runtime,
+                onPetDragBegan: { [weak self] in
+                    self?.beginPetDrag()
+                },
+                onPetDragChanged: { [weak self] translation in
+                    self?.updatePetDrag(translation: translation)
+                },
+                onPetDragEnded: { [weak self] in
+                    self?.endPetDrag()
+                }
+            )
+        )
+        host.frame = NSRect(x: 0, y: 0, width: 380, height: 420)
 
-        let w = NSWindow(
+        let w = PetOverlayWindow(
             contentRect: host.frame,
             styleMask: [.borderless],
             backing: .buffered,
@@ -46,7 +68,7 @@ final class PetWindowController {
         w.contentView = host
         w.setContentSize(host.fittingSize)
 
-        positionAtBottomRight(window: w)
+        restoreOrPositionAtDefault(window: w)
         w.orderFrontRegardless()
         self.window = w
     }
@@ -56,17 +78,79 @@ final class PetWindowController {
         window = nil
     }
 
-    private func positionAtBottomRight(window w: NSWindow) {
-        guard let screen = NSScreen.main else { return }
-        let frame = screen.visibleFrame
-        let size = w.frame.size
-        let margin: CGFloat = 16
-        let x = frame.maxX - size.width - margin
-        let y = frame.minY + margin
-        w.setFrame(
-            NSRect(x: x, y: y, width: size.width, height: size.height),
-            display: true
+    private func beginPetDrag() {
+        guard let window else { return }
+        dragStartFrame = window.frame
+    }
+
+    private func updatePetDrag(translation: CGSize) {
+        guard let window, let start = dragStartFrame else { return }
+        let requested = CGPoint(
+            x: start.origin.x + translation.width,
+            y: start.origin.y - translation.height
+        )
+        setWindowOrigin(requested, window: window, persist: false)
+    }
+
+    private func endPetDrag() {
+        guard let window else {
+            dragStartFrame = nil
+            return
+        }
+        persist(window.frame.origin)
+        dragStartFrame = nil
+    }
+
+    private func restoreOrPositionAtDefault(window w: NSWindow) {
+        if let restored = restoredOrigin(for: w) {
+            setWindowOrigin(restored, window: w, persist: false)
+            return
+        }
+        guard let origin = geometry(for: w).defaultOrigin()?.origin else { return }
+        setWindowOrigin(origin, window: w, persist: false)
+    }
+
+    private func restoredOrigin(for w: NSWindow) -> CGPoint? {
+        guard defaults.object(forKey: DefaultsKey.originX) != nil,
+              defaults.object(forKey: DefaultsKey.originY) != nil
+        else {
+            return nil
+        }
+        return CGPoint(
+            x: defaults.double(forKey: DefaultsKey.originX),
+            y: defaults.double(forKey: DefaultsKey.originY)
         )
     }
+
+    private func setWindowOrigin(
+        _ requested: CGPoint,
+        window w: NSWindow,
+        persist shouldPersist: Bool
+    ) {
+        let resolved = geometry(for: w).clamp(requested: requested)
+        let origin = resolved?.origin ?? requested
+        w.setFrameOrigin(origin)
+        if shouldPersist {
+            persist(origin)
+        }
+    }
+
+    private func persist(_ origin: CGPoint) {
+        defaults.set(Double(origin.x), forKey: DefaultsKey.originX)
+        defaults.set(Double(origin.y), forKey: DefaultsKey.originY)
+    }
+
+    private func geometry(for w: NSWindow) -> PetWindowGeometry {
+        PetWindowGeometry(
+            screens: PetWindow.currentScreens(),
+            petSize: w.frame.size,
+            edgeMargin: edgeMargin
+        )
+    }
+}
+
+private final class PetOverlayWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
 }
 #endif

@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import stat
+import sys
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -40,6 +43,14 @@ class HookInstallResult(HookInstallStatus):
     changed: bool
 
 
+@dataclass(frozen=True)
+class HookHelperStatus:
+    path: Path
+    exists: bool
+    executable: bool
+    message: str
+
+
 def normalize_install_source(source: str) -> HookInstallSource:
     normalized = source.strip().lower().replace("-", "_")
     if normalized in {"claude_code", "claude"}:
@@ -62,7 +73,57 @@ def default_config_path(source: HookInstallSource) -> Path:
 
 
 def default_hook_command(source: HookInstallSource) -> str:
-    return f"deskmate hook ingest --source {source.value}"
+    helper = shlex.quote(str(default_hook_helper_path()))
+    return f"{helper} hook ingest --source {source.value}"
+
+
+def default_hook_helper_path() -> Path:
+    return (
+        Path.home()
+        / "Library"
+        / "Application Support"
+        / "Deskmate"
+        / "deskmate-hook"
+    )
+
+
+def hook_helper_status(*, path: Path | None = None) -> HookHelperStatus:
+    helper_path = path or default_hook_helper_path()
+    exists = helper_path.exists()
+    executable = exists and os.access(helper_path, os.X_OK)
+    if exists and executable:
+        message = "installed"
+    elif exists:
+        message = "helper exists but is not executable"
+    else:
+        message = "helper missing"
+    return HookHelperStatus(helper_path, exists, executable, message)
+
+
+def ensure_hook_helper(
+    *,
+    path: Path | None = None,
+    python_executable: str | None = None,
+) -> HookHelperStatus:
+    helper_path = path or default_hook_helper_path()
+    helper_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = helper_path.with_suffix(helper_path.suffix + ".tmp")
+    tmp.write_text(_hook_helper_script(python_executable or sys.executable), encoding="utf-8")
+    tmp.replace(helper_path)
+    mode = helper_path.stat().st_mode
+    helper_path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return hook_helper_status(path=helper_path)
+
+
+def _hook_helper_script(python_executable: str) -> str:
+    return (
+        "#!/bin/sh\n"
+        "# Managed by Deskmate. Stable entrypoint for external agent hooks.\n"
+        "if command -v deskmate >/dev/null 2>&1; then\n"
+        "  exec deskmate \"$@\"\n"
+        "fi\n"
+        f"exec {shlex.quote(python_executable)} -m deskmate_agent.cli \"$@\"\n"
+    )
 
 
 def status_hooks(
@@ -98,6 +159,8 @@ def install_hooks(
     hook_command: str | None = None,
 ) -> HookInstallResult:
     path = config_path or default_config_path(source)
+    if hook_command is None:
+        ensure_hook_helper()
     command = hook_command or default_hook_command(source)
     if source is HookInstallSource.CODEX and path.suffix != ".json":
         return _install_codex_toml(path, command)
@@ -619,11 +682,15 @@ def _atomic_write(path: Path, contents: str) -> None:
 
 
 __all__ = [
+    "HookHelperStatus",
     "HookInstallResult",
     "HookInstallSource",
     "HookInstallStatus",
     "default_config_path",
+    "default_hook_helper_path",
     "default_hook_command",
+    "ensure_hook_helper",
+    "hook_helper_status",
     "install_hooks",
     "normalize_install_source",
     "status_hooks",

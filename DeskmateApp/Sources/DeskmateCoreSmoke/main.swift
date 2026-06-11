@@ -427,7 +427,11 @@ runner.test("log: trace_id propagates across async tasks") {
 
 func fullPackManifest() -> CharacterPackManifest {
     var states: [String: StateFrames] = [:]
-    for name in ["idle", "working", "thinking", "alert", "happy", "nesting"] {
+    for name in [
+        "idle", "running", "review", "waiting", "jumping", "failed",
+        "dozing", "sleeping", "waking", "drag", "react-click",
+        "working", "thinking", "alert", "happy", "nesting",
+    ] {
         states[name] = StateFrames(fps: 4, frames: ["\(name)/000.png"])
     }
     return CharacterPackManifest(id: "pixie", displayName: "Pixie", states: states)
@@ -447,7 +451,7 @@ runner.test("petsm: mood maps directly to animation") {
     }
 }
 
-runner.test("petsm: pending approvals force alert + concerned + attention=1") {
+runner.test("petsm: pending approvals force waiting + concerned + attention=1") {
     let m = fullPackManifest()
     let domain = DomainState(
         currentPriority: .p2,
@@ -455,7 +459,7 @@ runner.test("petsm: pending approvals force alert + concerned + attention=1") {
         pendingApprovals: ["t1"]
     )
     let out = PetStateMachine.reduce(PetStateMachine.Input(domain: domain), manifest: m)
-    try runner.expect(out.animationState == "alert", "animation != alert")
+    try runner.expect(out.animationState == "waiting", "animation != waiting")
     try runner.expect(out.emotion == "concerned", "emotion != concerned")
     try runner.expect(out.attentionLevel >= 0.99, "attention not pinned to 1.0")
 }
@@ -468,6 +472,17 @@ runner.test("petsm: animation override wins over mood") {
     )
     let out = PetStateMachine.reduce(input, manifest: m)
     try runner.expect(out.animationState == "thinking", "override ignored")
+}
+
+runner.test("petsm: animation override wins over auto-rest") {
+    let m = fullPackManifest()
+    let input = PetStateMachine.Input(
+        domain: DomainState(agentMood: .idle),
+        idleMs: PetStateMachine.sleepingThresholdMs + 1,
+        animationOverride: "react-click"
+    )
+    let out = PetStateMachine.reduce(input, manifest: m)
+    try runner.expect(out.animationState == "react-click", "override lost to sleep")
 }
 
 runner.test("petsm: nesting switches anchor and animation") {
@@ -491,6 +506,53 @@ runner.test("petsm: focused user + idle stays idle with low attention") {
     let out = PetStateMachine.reduce(PetStateMachine.Input(domain: domain), manifest: m)
     try runner.expect(out.animationState == "idle", "should stay idle when focused")
     try runner.expect(out.attentionLevel <= 0.15, "attention too high while focused")
+}
+
+runner.test("petsm: idle local inactivity dozes then sleeps") {
+    let m = fullPackManifest()
+    let domain = DomainState(
+        currentPriority: .p3,
+        userFocus: .casual,
+        agentMood: .idle
+    )
+    let dozing = PetStateMachine.reduce(
+        PetStateMachine.Input(
+            domain: domain,
+            idleMs: PetStateMachine.dozingThresholdMs
+        ),
+        manifest: m
+    )
+    try runner.expect(dozing.animationState == "dozing", "expected dozing")
+    try runner.expect(dozing.attentionLevel == 0.12, "dozing attention wrong")
+
+    let sleeping = PetStateMachine.reduce(
+        PetStateMachine.Input(
+            domain: domain,
+            idleMs: PetStateMachine.sleepingThresholdMs
+        ),
+        manifest: m
+    )
+    try runner.expect(sleeping.animationState == "sleeping", "expected sleeping")
+    try runner.expect(sleeping.attentionLevel == 0.05, "sleeping attention wrong")
+}
+
+runner.test("petsm: auto-rest does not hide approvals") {
+    let m = fullPackManifest()
+    let domain = DomainState(
+        currentPriority: .p3,
+        userFocus: .casual,
+        agentMood: .idle,
+        pendingApprovals: ["approval-1"]
+    )
+    let out = PetStateMachine.reduce(
+        PetStateMachine.Input(
+            domain: domain,
+            idleMs: PetStateMachine.sleepingThresholdMs
+        ),
+        manifest: m
+    )
+    try runner.expect(out.animationState == "waiting", "approval should stay visible")
+    try runner.expect(out.attentionLevel >= 0.99, "approval attention should win")
 }
 
 runner.test("petsm: userInteracting locks isInteractive=false") {
@@ -1678,6 +1740,53 @@ runner.test("session-row: decodes extras and derives activity line") {
     )
 }
 
+runner.test("session-row: decodes structured tool extras") {
+    let raw = #"""
+    {"session_id":"tools","source":"deskmate","phase":"completed",
+     "summary":"Reminder scheduled for 1 minute: stretch.",
+     "extras":{"tool_action":"deskmate_schedule_reminder","tool_target":"stretch",
+     "tool_outcome":"Reminder scheduled for 1 minute: stretch.",
+     "tool_needs_user":"false",
+     "tool_summary":"action=deskmate_schedule_reminder; status=completed; target=stretch; outcome=Reminder scheduled for 1 minute: stretch.; needs_user=false",
+     "tool_task_id":"deskmate-tool-task-default-1",
+     "tool_task_status":"completed",
+     "tool_task_summary":"action=deskmate_schedule_reminder; status=completed; target=stretch"}}
+    """#.data(using: .utf8)!
+    let row = try JSONDecoder().decode(SessionRow.self, from: raw)
+    try runner.expect(
+        row.toolAction == "deskmate_schedule_reminder",
+        "tool action mismatch"
+    )
+    try runner.expect(row.toolTarget == "stretch", "tool target mismatch")
+    try runner.expect(row.toolNeedsUser == false, "tool needs_user mismatch")
+    try runner.expect(
+        row.toolTaskId == "deskmate-tool-task-default-1",
+        "tool task id mismatch"
+    )
+    try runner.expect(row.toolTaskStatus == "completed", "tool task status mismatch")
+    try runner.expect(
+        row.activityLine == "Deskmate · tool: deskmate_schedule_reminder -> stretch",
+        "structured activity line wrong: \(row.activityLine)"
+    )
+}
+
+runner.test("session-row: decodes approval resolution extras") {
+    let raw = #"""
+    {"session_id":"s1","extras":{"last_approval_id":"ap-1","last_approval_decision":"deny","last_approval_prompt":"Allow shell?","last_approval_risk_level":"high","last_approval_preview":"cmd: sudo rm -rf build/cache","last_approval_resolved_at_ms":"5000"}}
+    """#.data(using: .utf8)!
+    let row = try JSONDecoder().decode(SessionRow.self, from: raw)
+    try runner.expect(row.lastApprovalId == "ap-1", "approval id mismatch")
+    try runner.expect(row.lastApprovalDecision == "deny", "approval decision mismatch")
+    try runner.expect(row.lastApprovalPrompt == "Allow shell?", "approval prompt mismatch")
+    try runner.expect(row.lastApprovalRiskLevel == "high", "approval risk mismatch")
+    try runner.expect(row.lastApprovalPreview == "cmd: sudo rm -rf build/cache", "approval preview mismatch")
+    try runner.expect(row.lastApprovalResolvedAtMs == 5000, "approval resolved timestamp mismatch")
+    try runner.expect(
+        row.recentOutcomeLine == "Denied high approval: cmd: sudo rm -rf build/cache",
+        "approval outcome line mismatch: \(String(describing: row.recentOutcomeLine))"
+    )
+}
+
 runner.test("session-row: agent health summary rolls up runtime visibility") {
     let rows = [
         SessionRow(
@@ -1925,8 +2034,80 @@ runner.test("island content projection: multi-session focuses actionable") {
     guard case .multiSession(let sessions, let focus) = content else {
         throw SmokeError.expectation("expected multiSession content, got \(content)")
     }
-    try runner.expect(sessions.map(\.sessionId) == ["running", "answer"], "session order changed")
+    try runner.expect(sessions.map(\.sessionId) == ["answer", "running"], "session order changed")
     try runner.expect(focus?.sessionId == "answer", "focus should choose actionable")
+}
+
+runner.test("island content projection: recent completed closed session stays visible") {
+    let content = IslandContentProjection.compute(
+        islandState: nil,
+        sessions: [
+            smokeSessionRow(
+                "done",
+                state: .closed,
+                updated: 9_500,
+                closed: 9_500,
+                phase: .completed
+            ),
+        ],
+        approvals: [],
+        nowMs: 10_000,
+        showClosedAfterMs: 1_000
+    )
+    guard case .session(let session) = content else {
+        throw SmokeError.expectation("expected completed session content, got \(content)")
+    }
+    try runner.expect(session.sessionId == "done", "completed session mismatch")
+    try runner.expect(session.phase == .completed, "completed phase mismatch")
+}
+
+runner.test("island content projection: thinking session beats active task") {
+    let content = IslandContentProjection.compute(
+        islandState: nil,
+        sessions: [smokeSessionRow("s1", phase: .thinking)],
+        approvals: [],
+        tasks: [
+            TaskRow(
+                taskId: "task-1",
+                title: "Polish island task lane",
+                status: .inProgress
+            )
+        ]
+    )
+    guard case .session(let session) = content else {
+        throw SmokeError.expectation("expected session content, got \(content)")
+    }
+    try runner.expect(session.sessionId == "s1", "thinking session mismatch")
+}
+
+runner.test("island content projection: active task fills idle gap") {
+    let content = IslandContentProjection.compute(
+        islandState: nil,
+        sessions: [],
+        approvals: [],
+        tasks: [TaskRow(taskId: "task-1", status: .inProgress)]
+    )
+    guard case .task(let task) = content else {
+        throw SmokeError.expectation("expected task content, got \(content)")
+    }
+    try runner.expect(task.taskId == "task-1", "task id mismatch")
+}
+
+runner.test("island content projection: notification beats active task") {
+    let content = IslandContentProjection.compute(
+        islandState: IslandSurfaceState(
+            kind: .notificationCard,
+            activityId: "reminder-1",
+            detail: "Stand up"
+        ),
+        sessions: [],
+        approvals: [],
+        tasks: [TaskRow(taskId: "task-1", status: .inProgress)]
+    )
+    guard case .notification(let state) = content else {
+        throw SmokeError.expectation("expected notification content, got \(content)")
+    }
+    try runner.expect(state.activityId == "reminder-1", "notification id mismatch")
 }
 
 // --- Phase 5: ReminderRow + ReminderListAdapter (L2-#4) ---------------------
@@ -1964,6 +2145,41 @@ runner.test("reminder-row: unknown status falls back to .unknown") {
     """#.data(using: .utf8)!
     let row = try JSONDecoder().decode(ReminderRow.self, from: raw)
     try runner.expect(row.status == .unknown, "should be .unknown")
+}
+
+// --- Active durable TaskRow -------------------------------------------------
+
+runner.test("task-row: decodes active task with current step") {
+    let raw = #"""
+    {"task_id":"task-1","title":"Polish task lane","status":"in_progress",
+     "completed_step_count":3,"total_step_count":7,
+     "current_step":{"step_id":"step-2","position":2,"content":"Expose task snapshot",
+       "status":"in_progress","active_form":"Exposing task snapshot"},
+     "steps":[{"step_id":"step-1","content":"Read references","status":"completed"},
+       {"step_id":"step-2","content":"Expose task snapshot",
+        "status":"in_progress","active_form":"Exposing task snapshot"}]}
+    """#.data(using: .utf8)!
+    let row = try JSONDecoder().decode(TaskRow.self, from: raw)
+    try runner.expect(row.taskId == "task-1", "task_id mismatch")
+    try runner.expect(row.status == .inProgress, "status mismatch")
+    try runner.expect(row.currentStepLine == "step: Exposing task snapshot",
+                      "current step line mismatch")
+    try runner.expect(row.steps.first?.status == .completed, "step status mismatch")
+    try runner.expect(row.completedStepCount == 3, "completed step count mismatch")
+    try runner.expect(row.totalStepCount == 7, "total step count mismatch")
+    try runner.expect(row.stepProgressLabel == "3/7 steps", "progress label mismatch")
+    try runner.expect(row.stepProgressLine == "progress: 3/7 steps",
+                      "progress line mismatch")
+}
+
+runner.test("task-row: unknown status falls back and title uses id") {
+    let raw = #"""
+    {"task_id":"task-2","status":"blocked"}
+    """#.data(using: .utf8)!
+    let row = try JSONDecoder().decode(TaskRow.self, from: raw)
+    try runner.expect(row.status == .unknown, "expected unknown")
+    try runner.expect(row.displayTitle == "task-2", "title fallback mismatch")
+    try runner.expect(row.stepProgressLabel == nil, "empty steps should hide progress")
 }
 
 runner.test("reminder-adapter: pending > fired > terminal") {
@@ -2035,6 +2251,32 @@ runner.test("approval-row: unknown decision falls back") {
     """#.data(using: .utf8)!
     let row = try JSONDecoder().decode(ApprovalRow.self, from: raw)
     try runner.expect(row.decision == .unknown, "should be .unknown")
+}
+
+runner.test("approval-row: decodes extras and derives detail line") {
+    let raw = #"""
+    {"approval_id":"ap-5","prompt":"Allow command?","extras":{"tool_name":"Bash","command":"pytest tests/test_app.py","approval_preview":"cmd: pytest tests/test_app.py","risk_level":"medium","risk_summary":"Shell command can affect the local workspace.","ignored":42}}
+    """#.data(using: .utf8)!
+    let row = try JSONDecoder().decode(ApprovalRow.self, from: raw)
+    try runner.expect(row.extras["tool_name"] == "Bash", "tool_name extra mismatch")
+    try runner.expect(row.extras["ignored"] == nil, "non-string extra should be ignored")
+    try runner.expect(row.toolName == "Bash", "toolName mismatch")
+    try runner.expect(row.command == "pytest tests/test_app.py", "command mismatch")
+    try runner.expect(row.approvalPreview == "cmd: pytest tests/test_app.py", "approvalPreview mismatch")
+    try runner.expect(row.riskLevel == "medium", "riskLevel mismatch")
+    try runner.expect(row.riskSummary == "Shell command can affect the local workspace.", "riskSummary mismatch")
+    try runner.expect(row.detailLine == "cmd: pytest tests/test_app.py", "detailLine mismatch: \(String(describing: row.detailLine))")
+}
+
+runner.test("approval-row: detail line falls back to tool context") {
+    let row = ApprovalRow(
+        approvalId: "ap-6",
+        extras: [
+            "tool_action": "deskmate_open_app",
+            "tool_target": "Calendar"
+        ]
+    )
+    try runner.expect(row.detailLine == "tool: deskmate_open_app -> Calendar", "tool detail mismatch: \(String(describing: row.detailLine))")
 }
 
 // --- Phase 7: UPDATE_DOMAIN_STATE intent kind (L1-B) ------------------------
@@ -3745,6 +3987,29 @@ runner.test("factory: answerQuestion targets .session with answer payload") {
     try runner.expect(a.payload["answer"] == .string("Use Cursor"), "answer wrong")
 }
 
+runner.test("factory: openTaskDetail targets .skill with task_id payload") {
+    let a = InteractionActionFactory.openTaskDetail(id: "task-7")
+    try runner.expect(a.source == .menuBar, "source wrong")
+    try runner.expect(a.target == .skill, "target wrong")
+    try runner.expect(a.kind == .taskOpenDetail, "kind wrong")
+    try runner.expect(a.payload["task_id"] == .string("task-7"), "task_id wrong")
+}
+
+runner.test("factory: task control actions target .skill with task_id payload") {
+    let cases: [(InteractionAction, InteractionKind)] = [
+        (InteractionActionFactory.startTask(id: "task-7"), .taskStart),
+        (InteractionActionFactory.pauseTask(id: "task-7"), .taskPause),
+        (InteractionActionFactory.advanceTask(id: "task-7"), .taskAdvance),
+        (InteractionActionFactory.completeTask(id: "task-7"), .taskComplete),
+    ]
+    for (action, kind) in cases {
+        try runner.expect(action.source == .menuBar, "source wrong")
+        try runner.expect(action.target == .skill, "target wrong")
+        try runner.expect(action.kind == kind, "kind wrong")
+        try runner.expect(action.payload["task_id"] == .string("task-7"), "task_id wrong")
+    }
+}
+
 runner.test("factory: dismissSurface emits typed surface.dismiss action") {
     let a = InteractionActionFactory.dismissSurface(
         surface: .sessionList,
@@ -3828,16 +4093,18 @@ runner.test("live-list-store: apply dedupes identical lists") {
     try runner.expect(hits == 2, "expected 2 hits (initial + first apply), got \(hits)")
 }
 
-runner.test("snapshot-hydrator: populates session + reminder + approval stores") {
+runner.test("snapshot-hydrator: populates session + reminder + approval + task stores") {
     let domain = LiveDomainStateStore()
     let sessions = LiveSessionListStore()
     let reminders = LivePendingRemindersStore()
     let approvals = LivePendingApprovalsStore()
+    let tasks = LiveActiveTasksStore()
     let h = SnapshotHydrator(
         domainStore: domain,
         sessionStore: sessions,
         reminderStore: reminders,
         approvalStore: approvals,
+        taskStore: tasks,
         callbackQueue: .global(qos: .userInitiated)
     )
     let env = BridgeEnvelope.of(
@@ -3856,6 +4123,24 @@ runner.test("snapshot-hydrator: populates session + reminder + approval stores")
                 "approval_id": .string("ap-1"),
                 "prompt": .string("allow clipboard?"),
             ])]),
+            "active_tasks": .array([.object([
+                "task_id": .string("task-1"),
+                "title": .string("Polish task lane"),
+                "completed_step_count": .int(4),
+                "total_step_count": .int(9),
+                "current_step": .object([
+                    "step_id": .string("step-1"),
+                    "content": .string("Expose task snapshot"),
+                    "status": .string("in_progress"),
+                    "active_form": .string("Exposing task snapshot"),
+                ]),
+                "steps": .array([.object([
+                    "step_id": .string("step-1"),
+                    "content": .string("Expose task snapshot"),
+                    "status": .string("in_progress"),
+                    "active_form": .string("Exposing task snapshot"),
+                ])]),
+            ])]),
         ]
     )
     h.handle(env)
@@ -3865,6 +4150,12 @@ runner.test("snapshot-hydrator: populates session + reminder + approval stores")
                       "reminders wrong")
     try runner.expect(approvals.current.map(\.approvalId) == ["ap-1"],
                       "approvals wrong")
+    try runner.expect(tasks.current.map(\.taskId) == ["task-1"],
+                      "tasks wrong")
+    try runner.expect(tasks.current.first?.currentStepLine == "step: Exposing task snapshot",
+                      "task current step wrong")
+    try runner.expect(tasks.current.first?.stepProgressLabel == "4/9 steps",
+                      "task progress wrong")
 }
 
 runner.test("snapshot-hydrator: empty list field clears a store") {
@@ -3885,7 +4176,7 @@ runner.test("snapshot-hydrator: empty list field clears a store") {
     try runner.expect(store.current.isEmpty, "empty list must clear store")
 }
 
-runner.test("shell: state.snapshot hydrates all three list stores") {
+runner.test("shell: state.snapshot hydrates all four list stores") {
     let harness = SmokeShellHarness()
     var config = DeskmateShell.Configuration(
         bridgeBackoff: .init(
@@ -3909,6 +4200,7 @@ runner.test("shell: state.snapshot hydrates all three list stores") {
     let sessionHit = DispatchSemaphore(value: 0)
     let reminderHit = DispatchSemaphore(value: 0)
     let approvalHit = DispatchSemaphore(value: 0)
+    let taskHit = DispatchSemaphore(value: 0)
     let us1 = shell.sessionList.subscribe { rows in
         if rows.first?.sessionId == "s-42" { sessionHit.signal() }
     }
@@ -3918,7 +4210,10 @@ runner.test("shell: state.snapshot hydrates all three list stores") {
     let us3 = shell.pendingApprovals.subscribe { rows in
         if rows.first?.approvalId == "ap-42" { approvalHit.signal() }
     }
-    defer { us1(); us2(); us3() }
+    let us4 = shell.activeTasks.subscribe { rows in
+        if rows.first?.taskId == "task-42" { taskHit.signal() }
+    }
+    defer { us1(); us2(); us3(); us4() }
 
     let snap = BridgeEnvelope.of(
         .stateSnapshot,
@@ -3933,12 +4228,16 @@ runner.test("shell: state.snapshot hydrates all three list stores") {
             "pending_approvals_detail": .array([.object([
                 "approval_id": .string("ap-42"),
             ])]),
+            "active_tasks": .array([.object([
+                "task_id": .string("task-42"),
+            ])]),
         ]
     )
     smokeWriteAll(fd: harness.peerSnapshot[0], try EnvelopeFraming.encode(snap))
     try runner.expect(sessionHit.wait(timeout: .now() + 2.0) == .success, "sessions")
     try runner.expect(reminderHit.wait(timeout: .now() + 2.0) == .success, "reminders")
     try runner.expect(approvalHit.wait(timeout: .now() + 2.0) == .success, "approvals")
+    try runner.expect(taskHit.wait(timeout: .now() + 2.0) == .success, "tasks")
 }
 
 runner.test("shell: state.snapshot envelope hydrates domainState") {

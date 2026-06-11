@@ -36,6 +36,10 @@ class InteractionKind(StrEnum):
     QUESTION_ANSWER = "question.answer"
     SESSION_JUMP = "session.jump"
     TASK_OPEN_DETAIL = "task.open_detail"
+    TASK_START = "task.start"
+    TASK_PAUSE = "task.pause"
+    TASK_ADVANCE = "task.advance"
+    TASK_COMPLETE = "task.complete"
 
     # Surface lifecycle
     SURFACE_DISMISS = "surface.dismiss"

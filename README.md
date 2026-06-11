@@ -5,6 +5,29 @@ macOS 桌面陪伴 Agent —— 桌宠与灵动岛协同双通道。
 一个 Agent 内核，驱动两条信息输出通道：**桌宠**（陪伴）与**灵动岛**（事务）。
 当前实现基线为 `deskmate-mvp-v10-unified`（见 `/Users/tanshuheng/.windsurf/plans/deskmate-mvp-v10-unified-6c686f.md`）。
 
+## 当前能力快照
+
+- **桌宠对话入口**：宠物气泡内可直接输入消息并发送给 Python agent；菜单栏也保留快速输入框。
+- **Agentic 工具调用**：支持 OpenAI-compatible Chat Completions，包括 DeepSeek 等兼容端点；工具调用可流式执行，并带超时与多轮工具调用上限。
+- **低风险电脑控制**：可通过自然语言打开应用、URL、文件夹、Finder 定位、系统设置、网页搜索、调节音量、截图、锁屏/睡眠、退出应用等；高风险动作走显式 approval。
+- **天气 / 倒计时 / 提醒**：可识别 `帮我看天气` 并打开 Weather app；可识别中文倒计时/提醒，例如 `帮我设置一个 3 分钟倒计时`。
+- **记忆与任务**：持久化 chat/profile/task/tool action，上下文可跨 agent 重启恢复；任务和记忆写入默认需要明确用户意图或 approval。
+- **灵动岛事务视图**：展示 approvals、build/live activity、notification、agent sessions、active tasks；`thinking` 和最近 `completed` 的 session 会在岛上保留展示。
+- **角色包与状态动画**：像素桌宠支持 idle/running/thinking/waiting/dozing/sleeping/failed 等状态，内置多套 OpenPets 风格变体资源。
+
+## LLM / DeepSeek 配置
+
+Python agent 使用 OpenAI-compatible `/chat/completions` 接口。不要把真实 API key 写入仓库；本地用环境变量或 `launchctl setenv` 配置：
+
+```bash
+export DESKMATE_LLM_API_KEY='...'
+export DESKMATE_LLM_BASE_URL='https://api.deepseek.com'
+export DESKMATE_LLM_MODEL='deepseek-v4-flash'
+export DESKMATE_LLM_STREAMING=1
+export DESKMATE_LLM_TOOL_TIMEOUT_S=15
+export DESKMATE_LLM_TOOL_ROUND_LIMIT=3
+```
+
 ## 仓库结构
 
 ```
@@ -50,6 +73,18 @@ swift run DeskmateCoreSmoke
 ```
 
 `DeskmateCoreSmoke` 是一个可执行的 Phase 0 验收程序，断言与 `Tests/DeskmateCoreTests/` 对齐，覆盖 envelope round-trip / forward-compat / IslandSurface L1-E / 角色包 manifest / trace_id 任务本地传递。
+
+常用端到端验证：
+
+```bash
+cd agent
+pytest
+ruff check .
+
+cd ../DeskmateApp
+swift run DeskmateCoreSmoke
+swift build --product DeskmateMenuBarApp
+```
 
 ## 角色合规声明
 

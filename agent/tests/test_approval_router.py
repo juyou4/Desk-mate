@@ -253,6 +253,71 @@ async def test_resolve_emits_dismiss_island_with_surface_id():
 
 
 @pytest.mark.asyncio
+async def test_resolve_records_approval_decision_on_session():
+    store = ApprovalStore()
+    store.add(
+        Approval(
+            approval_id="a1",
+            prompt="Allow shell?",
+            created_at_ms=1000,
+            surface_id="approval:a1",
+            session_id="s1",
+            extras={
+                "risk_level": "high",
+                "risk_summary": "Shell command may modify files.",
+                "approval_preview": "cmd: sudo rm -rf build/cache",
+                "tool_name": "Bash",
+                "command": "sudo rm -rf build/cache",
+            },
+        )
+    )
+    emitted: list = []
+
+    async def sink(intent):
+        emitted.append(intent)
+
+    session_store = SessionStore()
+    session_store.upsert(
+        SessionInfo(
+            session_id="s1",
+            phase=SessionPhase.WAITING_FOR_APPROVAL,
+            created_at_ms=1000,
+            updated_at_ms=1000,
+            extras={"kept": "yes"},
+        )
+    )
+    projector = DomainStateProjector(
+        approval_store=store,
+        session_store=session_store,
+        intent_sink=sink,
+    )
+    router = ApprovalRouter(
+        store,
+        intent_sink=sink,
+        session_store=session_store,
+        domain_projector=projector,
+        clock=lambda: 5_000,
+    )
+
+    result = await router.handle(_action(allow=False))
+
+    assert result.effect == "approval.resolve.accepted"
+    session = session_store.get("s1")
+    assert session is not None
+    assert session.phase == SessionPhase.RUNNING
+    assert session.updated_at_ms == 5_000
+    assert session.extras["kept"] == "yes"
+    assert session.extras["last_approval_id"] == "a1"
+    assert session.extras["last_approval_decision"] == "deny"
+    assert session.extras["last_approval_prompt"] == "Allow shell?"
+    assert session.extras["last_approval_resolved_at_ms"] == "5000"
+    assert session.extras["last_approval_risk_level"] == "high"
+    assert session.extras["last_approval_preview"] == "cmd: sudo rm -rf build/cache"
+    assert session.extras["last_approval_tool_name"] == "Bash"
+    assert session.extras["last_approval_command"] == "sudo rm -rf build/cache"
+
+
+@pytest.mark.asyncio
 async def test_resolve_terminal_session_phase_unchanged():
     """R1.3: if session already COMPLETED, phase stays."""
     store = ApprovalStore()
@@ -291,4 +356,8 @@ async def test_resolve_terminal_session_phase_unchanged():
         domain_projector=projector,
     )
     await router.handle(_action(allow=True))
-    assert session_store.get("s1").phase == SessionPhase.COMPLETED
+    session = session_store.get("s1")
+    assert session is not None
+    assert session.phase == SessionPhase.COMPLETED
+    assert session.extras["last_approval_id"] == "a1"
+    assert session.extras["last_approval_decision"] == "allow"

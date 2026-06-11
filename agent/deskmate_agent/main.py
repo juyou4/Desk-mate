@@ -56,6 +56,11 @@ def _codex_app_server_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+def _codex_transcript_watcher_enabled() -> bool:
+    raw = os.environ.get("DESKMATE_CODEX_TRANSCRIPTS", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
 async def run() -> None:
     install_uvloop_if_available()
     configure_logging()
@@ -63,6 +68,7 @@ async def run() -> None:
         socket_path=_resolved_socket_path(),
         db_dir=default_db_dir(),
         codex_app_server_enabled=_codex_app_server_enabled(),
+        codex_transcript_watcher_enabled=_codex_transcript_watcher_enabled(),
     )
     app = App(config, llm_prewarm=default_llm_prewarm)
     runtime = await app.setup()

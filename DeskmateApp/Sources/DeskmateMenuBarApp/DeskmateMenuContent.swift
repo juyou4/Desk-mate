@@ -14,8 +14,14 @@ struct DeskmateMenuContent: View {
         VStack(alignment: .leading, spacing: 10) {
             header
             Divider()
+            messageInput
+            Divider()
             approvalsSection
-            if !runtime.approvals.isEmpty && (!runtime.sessions.isEmpty || !runtime.reminders.isEmpty) {
+            if !runtime.approvals.isEmpty && (!runtime.tasks.isEmpty || !runtime.sessions.isEmpty || !runtime.reminders.isEmpty) {
+                Divider()
+            }
+            tasksSection
+            if !runtime.tasks.isEmpty && (!runtime.sessions.isEmpty || !runtime.reminders.isEmpty) {
                 Divider()
             }
             sessionsSection
@@ -36,12 +42,13 @@ struct DeskmateMenuContent: View {
             Divider()
             diagnosticsSection
             Divider()
-            messageInput
-            Divider()
             footer
         }
         .padding(12)
         .frame(width: 340)
+        .onAppear {
+            inputFocused = true
+        }
         .sheet(isPresented: $showSettings) {
             SettingsSheet(runtime: runtime)
         }
@@ -116,6 +123,13 @@ struct DeskmateMenuContent: View {
             Text(a.prompt.isEmpty ? a.approvalId : a.prompt)
                 .font(.body)
                 .lineLimit(2)
+            if let detail = a.detailLine {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+            }
             HStack(spacing: 8) {
                 Button("Allow") {
                     runtime.resolveApproval(id: a.approvalId, allow: true)
@@ -131,6 +145,103 @@ struct DeskmateMenuContent: View {
             }
         }
         .padding(.vertical, 2)
+    }
+
+    private var tasksSection: some View {
+        Group {
+            if runtime.tasks.isEmpty {
+                EmptyView()
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Tasks (\(runtime.tasks.count))")
+                        .font(.subheadline.weight(.semibold))
+                    ForEach(runtime.tasks, id: \.taskId) { task in
+                        taskRow(task)
+                    }
+                }
+            }
+        }
+    }
+
+    private func taskRow(_ task: TaskRow) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Button {
+                runtime.openTaskDetail(task.taskId)
+            } label: {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(task.displayTitle)
+                            .font(.body)
+                            .lineLimit(1)
+                        Text(task.statusLabel)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    if let line = task.currentStepLine {
+                        Text(line)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    if let line = task.stepProgressLine {
+                        Text(line)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    if !task.notes.isEmpty {
+                        Text(task.notes)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            taskControls(task)
+        }
+        .padding(.vertical, 2)
+    }
+
+    @ViewBuilder
+    private func taskControls(_ task: TaskRow) -> some View {
+        HStack(spacing: 3) {
+            if task.status == .open {
+                taskControlButton("play.fill", help: "Start") {
+                    runtime.startTask(task.taskId)
+                }
+            } else if task.status == .inProgress {
+                taskControlButton("pause.fill", help: "Pause") {
+                    runtime.pauseTask(task.taskId)
+                }
+                taskControlButton("forward.end.fill", help: "Next step") {
+                    runtime.advanceTask(task.taskId)
+                }
+                taskControlButton("checkmark", help: "Complete") {
+                    runtime.completeTask(task.taskId)
+                }
+            }
+        }
+    }
+
+    private func taskControlButton(
+        _ systemName: String,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 10, weight: .semibold))
+                .frame(width: 20, height: 20)
+        }
+        .buttonStyle(.borderless)
+        .controlSize(.mini)
+        .help(help)
     }
 
     private var sessionsSection: some View {
@@ -151,10 +262,17 @@ struct DeskmateMenuContent: View {
                                         s.title.isEmpty
                                             ? s.sessionId : s.title
                                     )
-                                    if let source = s.sourceLabel {
-                                        Text(source)
+                                    Text(s.activityLine)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                    if let outcome = s.recentOutcomeLine {
+                                        Text(outcome)
                                             .font(.caption2)
                                             .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
                                     }
                                 }
                                 Spacer()
@@ -269,11 +387,14 @@ struct DeskmateMenuContent: View {
 
     private var messageInput: some View {
         HStack(spacing: 6) {
-            TextField("Say something…", text: $messageDraft)
+            TextField("Message Deskmate", text: $messageDraft)
                 .textFieldStyle(.roundedBorder)
                 .focused($inputFocused)
                 .onSubmit { dispatchMessage() }
-            Button("Send") { dispatchMessage() }
+            Button { dispatchMessage() } label: {
+                Image(systemName: "paperplane.fill")
+                    .frame(width: 18, height: 18)
+            }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .disabled(
@@ -281,6 +402,7 @@ struct DeskmateMenuContent: View {
                         in: .whitespacesAndNewlines
                     ).isEmpty
                 )
+                .help("Send")
         }
     }
 

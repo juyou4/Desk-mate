@@ -7,6 +7,8 @@ import json
 from deskmate_agent.cli import main
 from deskmate_agent.hook_installers import (
     CLAUDE_PERMISSION_TIMEOUT_S,
+    ensure_hook_helper,
+    hook_helper_status,
     install_hooks,
     normalize_install_source,
     status_hooks,
@@ -53,7 +55,10 @@ def test_codex_install_preserves_user_hooks_and_uninstall_removes_managed(tmp_pa
     assert status_hooks(source, config_path=path).managed_count == 0
 
 
-def test_codex_toml_install_writes_feature_and_hooks_json_then_rolls_back(tmp_path) -> None:
+def test_codex_toml_install_writes_feature_and_hooks_json_then_rolls_back(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
     config = tmp_path / "config.toml"
     config.write_text('[features]\nmemories = true\n', encoding="utf-8")
     source = normalize_install_source("codex")
@@ -74,11 +79,13 @@ def test_codex_toml_install_writes_feature_and_hooks_json_then_rolls_back(tmp_pa
 
 
 def test_codex_toml_uninstall_preserves_user_enabled_feature(tmp_path) -> None:
+    # Pass an explicit command so this unit test doesn't touch the real
+    # Application Support helper path.
     config = tmp_path / "config.toml"
     config.write_text('[features]\ncodex_hooks = true\nmemories = true\n', encoding="utf-8")
     source = normalize_install_source("codex")
 
-    install_hooks(source, config_path=config)
+    install_hooks(source, config_path=config, hook_command="deskmate hook ingest --source codex")
     uninstall_hooks(source, config_path=config)
 
     text = config.read_text(encoding="utf-8")
@@ -86,7 +93,8 @@ def test_codex_toml_uninstall_preserves_user_enabled_feature(tmp_path) -> None:
     assert "memories = true" in text
 
 
-def test_claude_install_uses_long_permission_timeout(tmp_path) -> None:
+def test_claude_install_uses_long_permission_timeout(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
     path = tmp_path / "settings.json"
     source = normalize_install_source("claude")
 
@@ -95,10 +103,11 @@ def test_claude_install_uses_long_permission_timeout(tmp_path) -> None:
     data = json.loads(path.read_text(encoding="utf-8"))
     permission = data["hooks"]["PermissionRequest"][0]["hooks"][0]
     assert permission["timeout"] == CLAUDE_PERMISSION_TIMEOUT_S
-    assert "deskmate hook ingest --source claude" in permission["command"]
+    assert "hook ingest --source claude" in permission["command"]
 
 
-def test_cursor_install_status_uninstall_via_cli(tmp_path) -> None:
+def test_cursor_install_status_uninstall_via_cli(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
     path = tmp_path / "hooks.json"
 
     assert main(["hook", "install", "--source", "cursor", "--config", str(path)]) == 0
@@ -110,3 +119,51 @@ def test_cursor_install_status_uninstall_via_cli(tmp_path) -> None:
     assert main(["hook", "status", "--source", "cursor", "--config", str(path)]) == 0
     assert main(["hook", "uninstall", "--source", "cursor", "--config", str(path)]) == 0
     assert main(["hook", "status", "--source", "cursor", "--config", str(path)]) == 1
+
+
+def test_hook_helper_status_and_repair(tmp_path) -> None:
+    helper = tmp_path / "deskmate-hook"
+
+    missing = hook_helper_status(path=helper)
+    assert not missing.exists
+    assert not missing.executable
+
+    repaired = ensure_hook_helper(path=helper, python_executable="/usr/bin/python3")
+
+    assert repaired.exists
+    assert repaired.executable
+    text = helper.read_text(encoding="utf-8")
+    assert "Managed by Deskmate" in text
+    assert "deskmate_agent.cli" in text
+
+
+def test_hook_doctor_json_reports_helper_queue_and_hooks(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    config = tmp_path / ".codex" / "config.toml"
+
+    assert main(["hook", "install", "--source", "codex", "--config", str(config)]) == 0
+    capsys.readouterr()
+    code = main(
+        [
+            "hook",
+            "doctor",
+            "--source",
+            "codex",
+            "--queue-dir",
+            str(tmp_path / "queue"),
+            "--socket",
+            str(tmp_path / "ipc.sock"),
+            "--intent-log",
+            str(tmp_path / "intents.jsonl"),
+            "--json",
+        ]
+    )
+
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert out["ok"] is True
+    assert out["helper"]["executable"] is True
+    assert out["queue"]["writable"] is True
+    assert out["hooks"][0]["source"] == "codex"
+    assert out["hooks"][0]["installed"] is True

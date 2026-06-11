@@ -426,6 +426,9 @@ struct IslandOverlay: View {
             text: sessionActivityText(session),
             icon: sessionActivityIcon(session)
         ))
+        if let outcome = session.recentOutcomeLine {
+            lines.append(CockpitLine(id: "recent", label: "LAST", text: outcome, icon: "clock"))
+        }
         if let prompt = session.promptText {
             lines.append(CockpitLine(id: "prompt", label: "YOU", text: prompt, icon: "person.fill"))
         }
@@ -466,22 +469,32 @@ struct IslandOverlay: View {
 
     private func approvalInline(session: SessionRow, approval: ApprovalRow) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(approvalTitle(session: session, approval: approval))
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.88))
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(Color(red: 0.11, green: 0.08, blue: 0.03))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(.orange.opacity(0.18))
-                )
+            VStack(alignment: .leading, spacing: 4) {
+                Text(approvalTitle(session: session, approval: approval))
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.88))
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let detail = approval.detailLine {
+                    Text(detail)
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.54))
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color(red: 0.11, green: 0.08, blue: 0.03))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(.orange.opacity(0.18))
+            )
 
             HStack(spacing: 8) {
                 Button("Deny") {
@@ -636,6 +649,8 @@ struct IslandOverlay: View {
                 // count + "live". User can absorb richer status
                 // without expanding.
                 trailingCarousel
+            } else if let task = activeTask {
+                taskCompactTrailing(task)
             } else {
                 Text(compactSourceLabel)
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
@@ -664,12 +679,41 @@ struct IslandOverlay: View {
             )
         } else if activeSessionCount > 0 {
             trailingCarousel
+        } else if let task = activeTask {
+            taskCompactTrailing(task)
         } else {
             Text(compactSourceLabel)
                 .font(.system(size: 9, weight: .bold, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.68))
                 .lineLimit(1)
         }
+    }
+
+    private func taskCompactTrailing(_ task: TaskRow) -> some View {
+        compactPeekText(
+            icon: task.status == .inProgress ? "play.fill" : "circle",
+            primary: taskCompactPrimary(task),
+            secondary: taskCompactSecondary(task),
+            color: .cyan
+        )
+    }
+
+    private func taskCompactPrimary(_ task: TaskRow) -> String {
+        if let step = task.currentStepLine?
+            .replacingOccurrences(of: "step: ", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !step.isEmpty {
+            return truncateForPill(step.uppercased(), maxChars: 20)
+        }
+        return truncateForPill(task.displayTitle.uppercased(), maxChars: 20)
+    }
+
+    private func taskCompactSecondary(_ task: TaskRow) -> String? {
+        let label = task.status == .inProgress ? "doing" : "open"
+        let progress = task.stepProgressLabel.map { " · \($0)" } ?? ""
+        let title = task.displayTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if title.isEmpty { return truncateForPill("\(label)\(progress)", maxChars: 24) }
+        return truncateForPill("\(label)\(progress) · \(title)", maxChars: 24)
     }
 
     private func compactPeekText(
@@ -961,6 +1005,7 @@ struct IslandOverlay: View {
             || activeIslandKindRequiresCompactPresence
             || !runtime.sessions.isEmpty
             || !runtime.approvals.isEmpty
+            || activeTask != nil
     }
 
     private var activeIslandKindRequiresCompactPresence: Bool {
@@ -1010,6 +1055,10 @@ struct IslandOverlay: View {
             ?? visibleSessions.first
     }
 
+    private var activeTask: TaskRow? {
+        viewModel.content.activeTask
+    }
+
     private var chipColor: Color {
         switch runtime.bridgeState {
         case .stopped: return .red
@@ -1020,6 +1069,7 @@ struct IslandOverlay: View {
                 return approvalUrgencyColor(approval)
             }
             if let session = focusSession { return phaseColor(for: session) }
+            if activeTask != nil { return .cyan }
             // V10 island polish #7: idle-state chip color defers to
             // the user's accent preset. Active phases keep their
             // semantic colors (orange = needs approval, blue = busy)
@@ -1037,6 +1087,7 @@ struct IslandOverlay: View {
                 && session.phase != .failed
                 && session.phase != .unknown
         }
+        if activeTask?.status == .inProgress { return true }
         switch runtime.island?.state.kind {
         case .liveActivity, .sessionList:
             return true
@@ -1068,7 +1119,7 @@ struct IslandOverlay: View {
     }
 
     private var activeSessionCount: Int {
-        visibleSessions.filter { $0.state != .closed }.count
+        visibleSessions.count
     }
 
     private var agentHealthSummary: AgentHealthSummary {
@@ -1085,6 +1136,7 @@ struct IslandOverlay: View {
     private var headerTitle: String {
         if !runtime.approvals.isEmpty { return "Action needed" }
         if activeSessionCount > 0 { return "Agent sessions" }
+        if activeTask != nil { return "Active task" }
         return "Deskmate Island"
     }
 
@@ -1098,6 +1150,7 @@ struct IslandOverlay: View {
             let source = session.sourceLabel ?? session.source ?? "agent"
             return shouldShowFullCompactLabels ? fullSourceName(source).uppercased() : compactSourceCode(source)
         }
+        if activeTask != nil { return "TASK" }
         return "DM"
     }
 
@@ -1117,6 +1170,9 @@ struct IslandOverlay: View {
             return shouldShowFullCompactLabels
                 ? fullPhaseLabel(for: session).lowercased()
                 : compactPhaseLabel(for: session).lowercased()
+        }
+        if let task = activeTask {
+            return task.status == .inProgress ? "doing" : "open"
         }
         return nil
     }
@@ -1167,6 +1223,7 @@ struct IslandOverlay: View {
         if let session = focusSession {
             return compactSourceCode(session.sourceLabel ?? session.source ?? "agent")
         }
+        if activeTask != nil { return "task" }
         return "idle"
     }
 
@@ -1415,7 +1472,7 @@ struct IslandOverlay: View {
     private func sessionActivityLabel(_ session: SessionRow) -> String {
         if session.command != nil { return "CMD" }
         if session.filePath != nil { return "FILE" }
-        if session.toolName != nil { return "TOOL" }
+        if session.toolAction != nil { return "TOOL" }
         if session.windowTitle != nil { return "WIN" }
         return "NOW"
     }
@@ -1427,8 +1484,14 @@ struct IslandOverlay: View {
         if let filePath = session.filePath {
             return URL(fileURLWithPath: filePath).lastPathComponent
         }
-        if let toolName = session.toolName {
-            return toolName
+        if let toolAction = session.toolAction {
+            if let target = session.toolTarget {
+                return "\(toolAction) -> \(target)"
+            }
+            if let outcome = session.toolOutcome {
+                return "\(toolAction) -> \(outcome)"
+            }
+            return toolAction
         }
         if let windowTitle = session.windowTitle {
             return windowTitle
@@ -1441,7 +1504,7 @@ struct IslandOverlay: View {
     private func sessionActivityIcon(_ session: SessionRow) -> String {
         if session.command != nil { return "terminal" }
         if session.filePath != nil { return "doc.text" }
-        if session.toolName != nil { return "wrench.and.screwdriver" }
+        if session.toolAction != nil { return "wrench.and.screwdriver" }
         if session.windowTitle != nil { return "macwindow" }
         switch session.phase {
         case .waitingForApproval: return "exclamationmark.triangle"

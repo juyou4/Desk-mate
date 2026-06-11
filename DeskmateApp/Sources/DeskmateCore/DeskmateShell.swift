@@ -72,6 +72,10 @@ public final class DeskmateShell {
     /// ``DomainState.pendingApprovals``).
     public let pendingApprovals: LivePendingApprovalsStore
 
+    /// Active durable user tasks, hydrated from
+    /// ``state.snapshot.active_tasks``.
+    public let activeTasks: LiveActiveTasksStore
+
     /// Routes incoming :class:`CompanionIntent` values into the above
     /// stores. Pre-wired with ``bindDomainState`` / ``bindBubbleQueue``
     /// / ``bindIslandSurface``.
@@ -104,6 +108,7 @@ public final class DeskmateShell {
         self.sessionList = LiveSessionListStore()
         self.pendingReminders = LivePendingRemindersStore()
         self.pendingApprovals = LivePendingApprovalsStore()
+        self.activeTasks = LiveActiveTasksStore()
 
         let dispatcher = CompanionIntentDispatcher()
         dispatcher.bindDomainState(to: self.domainState)
@@ -116,6 +121,7 @@ public final class DeskmateShell {
             sessionStore: self.sessionList,
             reminderStore: self.pendingReminders,
             approvalStore: self.pendingApprovals,
+            taskStore: self.activeTasks,
             callbackQueue: callbackQueue
         )
 

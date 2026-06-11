@@ -1,0 +1,162 @@
+{
+  "author" : "OpenPets / Deskmate recolor (MIT)",
+  "avatar" : {
+    "default_style" : "pixel",
+    "supported_styles" : [
+      "pixel"
+    ]
+  },
+  "canvas_size" : [
+    192,
+    208
+  ],
+  "capabilities" : [
+    "universal_sprite_states",
+    "direct_reactions",
+    "auto_rest",
+    "recolored_variant"
+  ],
+  "display_name" : "OpenPets Aqua",
+  "fallbacks" : {
+    "alert" : "waiting",
+    "celebrating" : "jumping",
+    "dozing" : "idle",
+    "drag" : "running",
+    "editing" : "running",
+    "error" : "failed",
+    "happy" : "jumping",
+    "notification" : "waving",
+    "petting" : "waving",
+    "react-click" : "waving",
+    "running_left" : "running-left",
+    "running_right" : "running-right",
+    "sleeping" : "idle",
+    "success" : "jumping",
+    "testing" : "waiting",
+    "thinking" : "review",
+    "waking" : "jumping",
+    "walking" : "running",
+    "walking_left" : "running-left",
+    "walking_right" : "running-right",
+    "working" : "running"
+  },
+  "id" : "openpets_aqua",
+  "palette" : [
+
+  ],
+  "required_states" : [
+    "idle",
+    "running",
+    "review",
+    "waiting",
+    "waving",
+    "jumping",
+    "failed"
+  ],
+  "scale" : 1,
+  "spec_version" : 1,
+  "states" : {
+    "failed" : {
+      "fps" : 7,
+      "frames" : [
+        "failed/000.png",
+        "failed/001.png",
+        "failed/002.png",
+        "failed/003.png",
+        "failed/004.png",
+        "failed/005.png",
+        "failed/006.png",
+        "failed/007.png"
+      ]
+    },
+    "idle" : {
+      "fps" : 4,
+      "frames" : [
+        "idle/000.png",
+        "idle/001.png",
+        "idle/002.png",
+        "idle/003.png",
+        "idle/004.png",
+        "idle/005.png"
+      ]
+    },
+    "jumping" : {
+      "fps" : 7,
+      "frames" : [
+        "jumping/000.png",
+        "jumping/001.png",
+        "jumping/002.png",
+        "jumping/003.png",
+        "jumping/004.png"
+      ]
+    },
+    "review" : {
+      "fps" : 6,
+      "frames" : [
+        "review/000.png",
+        "review/001.png",
+        "review/002.png",
+        "review/003.png",
+        "review/004.png",
+        "review/005.png"
+      ]
+    },
+    "running" : {
+      "fps" : 8,
+      "frames" : [
+        "running/000.png",
+        "running/001.png",
+        "running/002.png",
+        "running/003.png",
+        "running/004.png",
+        "running/005.png"
+      ]
+    },
+    "running-left" : {
+      "fps" : 8,
+      "frames" : [
+        "running-left/000.png",
+        "running-left/001.png",
+        "running-left/002.png",
+        "running-left/003.png",
+        "running-left/004.png",
+        "running-left/005.png",
+        "running-left/006.png",
+        "running-left/007.png"
+      ]
+    },
+    "running-right" : {
+      "fps" : 8,
+      "frames" : [
+        "running-right/000.png",
+        "running-right/001.png",
+        "running-right/002.png",
+        "running-right/003.png",
+        "running-right/004.png",
+        "running-right/005.png",
+        "running-right/006.png",
+        "running-right/007.png"
+      ]
+    },
+    "waiting" : {
+      "fps" : 6,
+      "frames" : [
+        "waiting/000.png",
+        "waiting/001.png",
+        "waiting/002.png",
+        "waiting/003.png",
+        "waiting/004.png",
+        "waiting/005.png"
+      ]
+    },
+    "waving" : {
+      "fps" : 6,
+      "frames" : [
+        "waving/000.png",
+        "waving/001.png",
+        "waving/002.png",
+        "waving/003.png"
+      ]
+    }
+  }
+}

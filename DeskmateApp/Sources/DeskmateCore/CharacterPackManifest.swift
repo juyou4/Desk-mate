@@ -9,8 +9,31 @@ public struct CharacterPackManifest: Codable, Sendable, Equatable {
         "idle", "working", "thinking", "alert",
     ]
     public static let defaultFallbacks: [String: String] = [
-        "walking_left": "walking",
-        "walking_right": "walking",
+        "running": "working",
+        "review": "thinking",
+        "waiting": "alert",
+        "waving": "happy",
+        "jumping": "happy",
+        "failed": "alert",
+        "dozing": "idle",
+        "sleeping": "idle",
+        "waking": "jumping",
+        "drag": "running",
+        "react-click": "waving",
+        "petting": "waving",
+        "editing": "running",
+        "testing": "waiting",
+        "success": "jumping",
+        "error": "failed",
+        "celebrating": "jumping",
+        "notification": "waving",
+        "walking": "running",
+        "walking_left": "running-left",
+        "walking_right": "running-right",
+        "running_left": "running-left",
+        "running_right": "running-right",
+        "running-left": "walking",
+        "running-right": "walking",
     ]
 
     public var specVersion: Int

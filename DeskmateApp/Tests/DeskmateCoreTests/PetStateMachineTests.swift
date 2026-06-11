@@ -5,6 +5,16 @@ final class PetStateMachineTests: XCTestCase {
     private func manifest(
         states: [String: [String]] = [
             "idle": ["idle/000.png"],
+            "running": ["running/000.png"],
+            "review": ["review/000.png"],
+            "waiting": ["waiting/000.png"],
+            "jumping": ["jumping/000.png"],
+            "failed": ["failed/000.png"],
+            "dozing": ["dozing/000.png"],
+            "sleeping": ["sleeping/000.png"],
+            "waking": ["waking/000.png"],
+            "drag": ["drag/000.png"],
+            "react-click": ["react-click/000.png"],
             "working": ["working/000.png"],
             "thinking": ["thinking/000.png"],
             "alert": ["alert/000.png"],
@@ -43,7 +53,7 @@ final class PetStateMachineTests: XCTestCase {
         let out = PetStateMachine.reduce(
             PetStateMachine.Input(domain: domain), manifest: m
         )
-        XCTAssertEqual(out.animationState, "alert")
+        XCTAssertEqual(out.animationState, "waiting")
         XCTAssertEqual(out.emotion, "concerned")
         XCTAssertEqual(out.attentionLevel, 1.0, accuracy: 0.0001)
     }
@@ -56,6 +66,17 @@ final class PetStateMachineTests: XCTestCase {
         )
         let out = PetStateMachine.reduce(input, manifest: m)
         XCTAssertEqual(out.animationState, "thinking")
+    }
+
+    func testAnimationOverrideWinsOverAutoRest() {
+        let m = manifest()
+        let input = PetStateMachine.Input(
+            domain: DomainState(agentMood: .idle),
+            idleMs: PetStateMachine.sleepingThresholdMs + 1,
+            animationOverride: "react-click"
+        )
+        let out = PetStateMachine.reduce(input, manifest: m)
+        XCTAssertEqual(out.animationState, "react-click")
     }
 
     func testAnimationOverrideWalksManifestFallbacks() {
@@ -95,6 +116,53 @@ final class PetStateMachineTests: XCTestCase {
         )
         XCTAssertEqual(out.animationState, "idle")
         XCTAssertLessThanOrEqual(out.attentionLevel, 0.15)
+    }
+
+    func testIdlePetDozesThenSleepsAfterLocalInactivity() {
+        let m = manifest()
+        let domain = DomainState(
+            currentPriority: .p3,
+            userFocus: .casual,
+            agentMood: .idle
+        )
+        let dozing = PetStateMachine.reduce(
+            PetStateMachine.Input(
+                domain: domain,
+                idleMs: PetStateMachine.dozingThresholdMs
+            ),
+            manifest: m
+        )
+        XCTAssertEqual(dozing.animationState, "dozing")
+        XCTAssertEqual(dozing.attentionLevel, 0.12, accuracy: 0.0001)
+
+        let sleeping = PetStateMachine.reduce(
+            PetStateMachine.Input(
+                domain: domain,
+                idleMs: PetStateMachine.sleepingThresholdMs
+            ),
+            manifest: m
+        )
+        XCTAssertEqual(sleeping.animationState, "sleeping")
+        XCTAssertEqual(sleeping.attentionLevel, 0.05, accuracy: 0.0001)
+    }
+
+    func testAutoRestDoesNotHideApprovals() {
+        let m = manifest()
+        let domain = DomainState(
+            currentPriority: .p3,
+            userFocus: .casual,
+            agentMood: .idle,
+            pendingApprovals: ["approval-1"]
+        )
+        let out = PetStateMachine.reduce(
+            PetStateMachine.Input(
+                domain: domain,
+                idleMs: PetStateMachine.sleepingThresholdMs
+            ),
+            manifest: m
+        )
+        XCTAssertEqual(out.animationState, "waiting")
+        XCTAssertEqual(out.attentionLevel, 1.0, accuracy: 0.0001)
     }
 
     func testUserInteractingLocksInteractivity() {

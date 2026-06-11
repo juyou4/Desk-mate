@@ -9,9 +9,12 @@ from deskmate_agent.agent_runtime import (
     AgentRuntimeScanner,
     AgentRuntimeSource,
     AgentRuntimeStore,
+    decode_ps_output,
     discover_runtime_statuses,
     parse_ps_output,
+    scan_runtime_statuses,
 )
+from deskmate_agent.cli import main
 from deskmate_agent.sessions import SessionInfo, SessionStore
 
 
@@ -34,6 +37,123 @@ def test_parse_ps_output_and_discover_known_processes() -> None:
     assert (AgentRuntimeSource.CURSOR, AgentRuntimeKind.GUI_IDE) in pairs
     assert (AgentRuntimeSource.WINDSURF, AgentRuntimeKind.GUI_IDE) in pairs
     assert (AgentRuntimeSource.VSCODE, AgentRuntimeKind.GUI_IDE) in pairs
+
+
+def test_decode_ps_output_replaces_invalid_utf8_bytes() -> None:
+    text = decode_ps_output(
+        b"102 1 /opt/homebrew/bin/codex codex --prompt bad-\xff-byte\n"
+    )
+
+    rows = parse_ps_output(text)
+
+    assert len(rows) == 1
+    assert rows[0].pid == 102
+    assert "bad-" in rows[0].args
+
+
+def test_parse_ps_output_accepts_tty_column() -> None:
+    rows = parse_ps_output(
+        "101 1 ttys004 /opt/homebrew/bin/codex codex --prompt hello\n"
+    )
+
+    assert len(rows) == 1
+    assert rows[0].pid == 101
+    assert rows[0].tty == "ttys004"
+    assert rows[0].comm == "/opt/homebrew/bin/codex"
+    assert rows[0].args == "codex --prompt hello"
+
+
+def test_cli_agent_inherits_parent_terminal_metadata() -> None:
+    rows = parse_ps_output(
+        """
+        100 1 ?? /Applications/Ghostty.app/Contents/MacOS/ghostty ghostty
+        101 100 ttys004 /opt/homebrew/bin/codex codex
+        """
+    )
+
+    statuses = discover_runtime_statuses(rows, now_ms=1)
+    codex = next(s for s in statuses if s.source is AgentRuntimeSource.CODEX)
+
+    assert codex.raw["terminal_app"] == "Ghostty"
+    assert codex.raw["terminal_tty"] == "ttys004"
+    assert codex.raw["terminal_pid"] == 100
+    assert codex.raw["terminal_source"] == "ghostty"
+
+
+def test_scan_runtime_statuses_uses_shared_classifier() -> None:
+    statuses = scan_runtime_statuses(
+        ps_provider=lambda: """
+        100 1 ?? /Applications/Ghostty.app/Contents/MacOS/ghostty ghostty
+        101 100 ttys004 /opt/homebrew/bin/codex codex
+        """,
+        clock=lambda: 42_000,
+    )
+
+    codex = next(s for s in statuses if s.source is AgentRuntimeSource.CODEX)
+    assert codex.last_seen_ms == 42_000
+    assert codex.raw["terminal_app"] == "Ghostty"
+
+
+def test_cli_runtime_scan_json_reads_ps_file(tmp_path, capsys) -> None:
+    ps_file = tmp_path / "ps.txt"
+    ps_file.write_text(
+        """
+        100 1 ?? /Applications/Ghostty.app/Contents/MacOS/ghostty ghostty
+        101 100 ttys004 /opt/homebrew/bin/codex codex
+        """,
+        encoding="utf-8",
+    )
+
+    code = main(["runtime", "scan", "--ps-file", str(ps_file), "--json"])
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert '"source": "codex"' in out
+    assert '"terminal_app": "Ghostty"' in out
+    assert '"terminal_tty": "ttys004"' in out
+
+
+def test_cli_runtime_scan_human_output_includes_terminal_label(tmp_path, capsys) -> None:
+    ps_file = tmp_path / "ps.txt"
+    ps_file.write_text(
+        """
+        100 1 ?? /Applications/iTerm.app/Contents/MacOS/iTerm2 iTerm2
+        101 100 ttys004 /opt/homebrew/bin/claude claude --continue
+        """,
+        encoding="utf-8",
+    )
+
+    code = main(["runtime", "scan", "--ps-file", str(ps_file)])
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "Claude Code CLI:" in out
+    assert "terminal=iTerm@ttys004" in out
+
+
+@pytest.mark.asyncio
+async def test_scanner_writes_terminal_metadata_to_session_extras() -> None:
+    ps_text = """
+    100 1 ?? /Applications/iTerm.app/Contents/MacOS/iTerm2 iTerm2
+    101 100 ttys004 /opt/homebrew/bin/claude claude --continue
+    """
+    store = AgentRuntimeStore()
+    sessions = SessionStore()
+    scanner = AgentRuntimeScanner(
+        store,
+        sessions,
+        ps_provider=lambda: ps_text,
+        clock=lambda: 1_000,
+    )
+
+    await scanner.scan_once()
+
+    got = sessions.get("runtime-claude_code-101")
+    assert got is not None
+    assert got.extras["terminal_app"] == "iTerm"
+    assert got.extras["terminal_tty"] == "ttys004"
+    assert got.extras["terminal_pid"] == "100"
+    assert got.extras["terminal_source"] == "iterm"
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,7 @@ public enum IslandContent: Equatable, Sendable {
     case session(SessionRow)
     case multiSession(sessions: [SessionRow], focus: SessionRow?)
     case approval(session: SessionRow?, approval: ApprovalRow)
+    case task(TaskRow)
     case notification(state: IslandSurfaceState)
 }
 
@@ -19,12 +20,15 @@ public enum IslandStatus: Equatable, Sendable {
 
 public enum IslandContentProjection {
     /// Priority order, highest wins:
-    /// approval > build live activity > notification > multi-session >
-    /// single session > idle.
+    /// approval > build live activity > notification > visible sessions >
+    /// active task > idle.
     public static func compute(
         islandState: IslandSurfaceState?,
         sessions: [SessionRow],
-        approvals: [ApprovalRow]
+        approvals: [ApprovalRow],
+        tasks: [TaskRow] = [],
+        nowMs: Int = Int(Date().timeIntervalSince1970 * 1000),
+        showClosedAfterMs: Int? = 5 * 60 * 1000
     ) -> IslandContent {
         if let approval = approvals.first {
             let session = sessions.first { $0.sessionId == approval.sessionId }
@@ -52,13 +56,19 @@ public enum IslandContentProjection {
             return .notification(state: state)
         }
 
-        let active = sessions.filter { $0.state != .closed }
-        if active.count >= 2 {
-            let focus = active.first { $0.needsUserAction } ?? active.first
-            return .multiSession(sessions: active, focus: focus)
+        let visible = SessionListAdapter(maxRows: 5, showClosedAfterMs: showClosedAfterMs)
+            .display(sessions: sessions, nowMs: nowMs)
+        if visible.count >= 2 {
+            let focus = visible.first { $0.needsUserAction } ?? visible.first
+            return .multiSession(sessions: visible, focus: focus)
         }
-        if let session = active.first {
+        if let session = visible.first {
             return .session(session)
+        }
+
+        if let task = tasks.first(where: { $0.status == .inProgress })
+            ?? tasks.first(where: { $0.status == .open }) {
+            return .task(task)
         }
 
         return .idle
@@ -74,7 +84,7 @@ extension IslandContent {
             return focus
         case .approval(let session, _):
             return session
-        case .idle, .build, .notification:
+        case .idle, .build, .task, .notification:
             return nil
         }
     }
@@ -97,5 +107,10 @@ extension IslandContent {
     public var isMultiSession: Bool {
         if case .multiSession = self { return true }
         return false
+    }
+
+    public var activeTask: TaskRow? {
+        if case .task(let task) = self { return task }
+        return nil
     }
 }

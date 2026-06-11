@@ -251,6 +251,41 @@ public struct SessionRow: Equatable, Sendable, Codable {
         cleanExtra("tool_name")
     }
 
+    public var toolAction: String? {
+        cleanExtra("tool_action") ?? cleanExtra("tool_name")
+    }
+
+    public var toolTarget: String? {
+        cleanExtra("tool_target")
+    }
+
+    public var toolOutcome: String? {
+        cleanExtra("tool_outcome")
+    }
+
+    public var toolNeedsUser: Bool {
+        guard let raw = cleanExtra("tool_needs_user")?.lowercased() else {
+            return false
+        }
+        return raw == "true" || raw == "1" || raw == "yes"
+    }
+
+    public var toolSummary: String? {
+        cleanExtra("tool_summary")
+    }
+
+    public var toolTaskId: String? {
+        cleanExtra("tool_task_id")
+    }
+
+    public var toolTaskStatus: String? {
+        cleanExtra("tool_task_status")
+    }
+
+    public var toolTaskSummary: String? {
+        cleanExtra("tool_task_summary")
+    }
+
     public var command: String? {
         cleanExtra("command")
     }
@@ -261,6 +296,52 @@ public struct SessionRow: Equatable, Sendable, Codable {
 
     public var phaseSource: String? {
         cleanExtra("phase_source")
+    }
+
+    public var lastJumpEffect: String? {
+        cleanExtra("last_jump_effect")
+    }
+
+    public var lastJumpRoute: String? {
+        cleanExtra("last_jump_route")
+    }
+
+    public var lastJumpDetail: String? {
+        cleanExtra("last_jump_detail")
+    }
+
+    public var lastJumpAttempts: String? {
+        cleanExtra("last_jump_attempts")
+    }
+
+    public var lastJumpAtMs: Int? {
+        guard let raw = cleanExtra("last_jump_at_ms") else { return nil }
+        return Int(raw)
+    }
+
+    public var lastApprovalId: String? {
+        cleanExtra("last_approval_id")
+    }
+
+    public var lastApprovalDecision: String? {
+        cleanExtra("last_approval_decision")
+    }
+
+    public var lastApprovalPrompt: String? {
+        cleanExtra("last_approval_prompt")
+    }
+
+    public var lastApprovalRiskLevel: String? {
+        cleanExtra("last_approval_risk_level")
+    }
+
+    public var lastApprovalPreview: String? {
+        cleanExtra("last_approval_preview")
+    }
+
+    public var lastApprovalResolvedAtMs: Int? {
+        guard let raw = cleanExtra("last_approval_resolved_at_ms") else { return nil }
+        return Int(raw)
     }
 
     public var runtimeCommand: String? {
@@ -319,8 +400,16 @@ public struct SessionRow: Equatable, Sendable, Codable {
             action = "cmd: \(shorten(command, max: 72))"
         } else if let filePath {
             action = "file: \(URL(fileURLWithPath: filePath).lastPathComponent)"
-        } else if let toolName {
-            action = "tool: \(toolName)"
+        } else if let toolAction {
+            if let toolTarget {
+                action = "tool: \(toolAction) -> \(shorten(toolTarget, max: 64))"
+            } else if let toolOutcome {
+                action = "tool: \(toolAction) -> \(shorten(toolOutcome, max: 64))"
+            } else if let toolTaskSummary {
+                action = "tool: \(toolAction) -> \(shorten(toolTaskSummary, max: 64))"
+            } else {
+                action = "tool: \(toolAction)"
+            }
         } else {
             let summaryText = summary.trimmingCharacters(in: .whitespacesAndNewlines)
             action = summaryText.isEmpty ? phaseLabel : summaryText
@@ -333,6 +422,26 @@ public struct SessionRow: Equatable, Sendable, Codable {
 
     public var detailLine: String {
         activityLine
+    }
+
+    public var recentOutcomeLine: String? {
+        if let decision = lastApprovalDecision {
+            let verb = approvalDecisionLabel(decision)
+            let target = lastApprovalPreview
+                ?? lastApprovalPrompt.map { shorten($0, max: 72) }
+            let risk = lastApprovalRiskLevel.map { "\($0) " } ?? ""
+            if let target {
+                return "\(verb) \(risk)approval: \(shorten(target, max: 88))"
+            }
+            return "\(verb) \(risk)approval"
+        }
+        if let detail = lastJumpDetail {
+            return "Jump: \(shorten(detail, max: 88))"
+        }
+        if let effect = lastJumpEffect {
+            return "Jump: \(shorten(effect, max: 88))"
+        }
+        return nil
     }
 
     private var workspaceLabel: String {
@@ -352,6 +461,20 @@ public struct SessionRow: Equatable, Sendable, Codable {
     private func shorten(_ value: String, max: Int) -> String {
         guard value.count > max else { return value }
         return String(value.prefix(max - 3)) + "..."
+    }
+
+    private func approvalDecisionLabel(_ raw: String) -> String {
+        switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "allow", "allowed", "approve", "approved":
+            return "Allowed"
+        case "deny", "denied", "reject", "rejected":
+            return "Denied"
+        default:
+            return raw
+                .split(separator: "_")
+                .map { $0.prefix(1).uppercased() + $0.dropFirst() }
+                .joined(separator: " ")
+        }
     }
 
     private static func decodeStringExtras(

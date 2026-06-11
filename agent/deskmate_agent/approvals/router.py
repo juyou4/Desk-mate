@@ -14,7 +14,7 @@ from ..logging_setup import get_logger
 from ..protocol.actions import InteractionAction, InteractionKind
 from ..protocol.intents import CompanionIntent, IntentKind
 from ..sessions import SessionPhase, SessionStore
-from .model import ApprovalDecision
+from .model import Approval, ApprovalDecision
 from .store import ApprovalStore
 
 if TYPE_CHECKING:  # pragma: no cover — break import cycle (projector → approvals)
@@ -32,6 +32,7 @@ def _default_clock() -> int:
 #: the bridge. Re-declared here so this module does not pull in the
 #: dispatcher just for the alias.
 IntentSink = Callable[[CompanionIntent], Awaitable[None]]
+ApprovalResolvedHook = Callable[[Approval], Awaitable[None]]
 
 
 @dataclass
@@ -53,12 +54,14 @@ class ApprovalRouter:
         session_store: SessionStore,
         domain_projector: DomainStateProjector,
         clock: Callable[[], int] = _default_clock,
+        on_resolved: ApprovalResolvedHook | None = None,
     ) -> None:
         self._store = store
         self._intent_sink = intent_sink
         self._session_store = session_store
         self._domain_projector = domain_projector
         self._clock = clock
+        self._on_resolved = on_resolved
 
     async def handle(self, action: InteractionAction) -> ApprovalResolveResult:
         if action.kind is not InteractionKind.PERMISSION_RESOLVE:
@@ -78,7 +81,8 @@ class ApprovalRouter:
                 approval_id=approval_id,
             )
 
-        updated = self._store.resolve(approval_id, decision, self._clock())
+        now_ms = self._clock()
+        updated = self._store.resolve(approval_id, decision, now_ms)
         if updated is None:
             # Either unknown id or already terminal (double-click / stale).
             effect = (
@@ -105,19 +109,27 @@ class ApprovalRouter:
             # 2. Transition session phase to RUNNING if not terminal
             if self._session_store is not None and updated.session_id:
                 session = self._session_store.get(updated.session_id)
-                if session is not None and session.phase not in {
-                    SessionPhase.COMPLETED, SessionPhase.FAILED
-                }:
-                    self._session_store.upsert(session.model_copy(
-                        update={
-                            "phase": SessionPhase.RUNNING,
-                            "updated_at_ms": self._clock(),
-                        }
-                    ))
+                if session is not None:
+                    extras = {
+                        **(session.extras or {}),
+                        **_resolved_session_extras(updated),
+                    }
+                    update: dict[str, object] = {
+                        "updated_at_ms": now_ms,
+                        "extras": extras,
+                    }
+                    if session.phase not in {
+                        SessionPhase.COMPLETED, SessionPhase.FAILED
+                    }:
+                        update["phase"] = SessionPhase.RUNNING
+                    self._session_store.upsert(session.model_copy(update=update))
 
             # 3. Kick the domain projector to emit update_domain_state
             if self._domain_projector is not None:
                 self._domain_projector._kick()
+
+            if self._on_resolved is not None:
+                await self._on_resolved(updated)
 
             result = ApprovalResolveResult(
                 handled=True,
@@ -160,4 +172,35 @@ class ApprovalRouter:
         return None
 
 
-__all__ = ["ApprovalResolveResult", "ApprovalRouter", "IntentSink"]
+def _resolved_session_extras(approval: Approval) -> dict[str, str]:
+    extras = {
+        "last_approval_id": approval.approval_id,
+        "last_approval_decision": approval.decision.value,
+        "last_approval_prompt": approval.prompt,
+    }
+    if approval.resolved_at_ms is not None:
+        extras["last_approval_resolved_at_ms"] = str(approval.resolved_at_ms)
+    approval_extras = approval.extras if isinstance(approval.extras, dict) else {}
+    for source_key, target_key in (
+        ("risk_level", "last_approval_risk_level"),
+        ("risk_summary", "last_approval_risk_summary"),
+        ("approval_preview", "last_approval_preview"),
+        ("tool_name", "last_approval_tool_name"),
+        ("command", "last_approval_command"),
+        ("file_path", "last_approval_file_path"),
+    ):
+        value = approval_extras.get(source_key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            extras[target_key] = text
+    return extras
+
+
+__all__ = [
+    "ApprovalResolveResult",
+    "ApprovalResolvedHook",
+    "ApprovalRouter",
+    "IntentSink",
+]

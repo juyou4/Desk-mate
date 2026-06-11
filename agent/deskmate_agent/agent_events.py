@@ -27,8 +27,21 @@ class AgentEventBase:
     jump_url: str | None = None
     raw_event: str = ""
     tool_name: str = ""
+    tool_id: str = ""
+    tool_result: str = ""
+    tool_result_id: str = ""
+    tool_action: str = ""
+    tool_target: str = ""
+    tool_outcome: str = ""
+    tool_needs_user: str = ""
+    tool_summary: str = ""
+    tool_task_id: str = ""
+    tool_task_status: str = ""
+    tool_task_summary: str = ""
     command: str = ""
     file_path: str = ""
+    last_user: str = ""
+    last_assistant: str = ""
 
 
 @dataclass(frozen=True)
@@ -135,7 +148,7 @@ class AgentEventReducer:
                     session_id=event.session_id,
                     surface_id=f"approval:{approval_id}",
                     created_at_ms=event.ts_ms,
-                    extras=_extras(event),
+                    extras=_approval_extras(event),
                 )
             )
             return
@@ -298,11 +311,92 @@ def _extras(event: AgentEventBase) -> dict[str, str]:
     }
     if event.tool_name:
         extras["tool_name"] = event.tool_name
+    if event.tool_id:
+        extras["tool_id"] = event.tool_id
+    if event.tool_result:
+        extras["tool_result"] = event.tool_result
+    if event.tool_result_id:
+        extras["tool_result_id"] = event.tool_result_id
+    if event.tool_action:
+        extras["tool_action"] = event.tool_action
+    if event.tool_target:
+        extras["tool_target"] = event.tool_target
+    if event.tool_outcome:
+        extras["tool_outcome"] = event.tool_outcome
+    if event.tool_needs_user:
+        extras["tool_needs_user"] = event.tool_needs_user
+    if event.tool_summary:
+        extras["tool_summary"] = event.tool_summary
+    if event.tool_task_id:
+        extras["tool_task_id"] = event.tool_task_id
+    if event.tool_task_status:
+        extras["tool_task_status"] = event.tool_task_status
+    if event.tool_task_summary:
+        extras["tool_task_summary"] = event.tool_task_summary
     if event.command:
         extras["command"] = event.command
     if event.file_path:
         extras["file_path"] = event.file_path
+    if event.last_user:
+        extras["last_user"] = event.last_user
+    if event.last_assistant:
+        extras["last_assistant"] = event.last_assistant
     return extras
+
+
+def _approval_extras(event: PermissionRequested) -> dict[str, str]:
+    extras = _extras(event)
+    risk_level, risk_summary = _approval_risk(event)
+    extras["risk_level"] = risk_level
+    extras["risk_summary"] = risk_summary
+    if event.command:
+        extras["approval_preview"] = f"cmd: {_clip(event.command, 180)}"
+    elif event.file_path:
+        extras["approval_preview"] = f"file: {event.file_path}"
+    elif event.tool_name:
+        extras["approval_preview"] = f"tool: {event.tool_name}"
+    return extras
+
+
+def _approval_risk(event: AgentEventBase) -> tuple[str, str]:
+    tool = event.tool_name.strip().lower()
+    command = event.command.strip()
+    command_lower = command.lower()
+    file_path = event.file_path.strip()
+    destructive_tokens = (
+        "rm ",
+        "rm -",
+        "mv ",
+        "chmod ",
+        "chown ",
+        "sudo ",
+        "git reset",
+        "git clean",
+        "kill ",
+        "pkill ",
+    )
+
+    if tool in {"bash", "shell", "terminal", "run_shell"} or command:
+        if any(token in f" {command_lower} " for token in destructive_tokens):
+            return "high", "Shell command may modify files, processes, or permissions."
+        return "medium", "Shell command can affect the local workspace."
+
+    if tool in {"edit", "write", "multiedit"} or file_path:
+        return "medium", "Tool may modify a local file."
+
+    if tool in {"read", "grep", "glob", "ls", "search"}:
+        return "low", "Read-only tool request."
+
+    if event.tool_name:
+        return "medium", f"Agent requested permission to use {event.tool_name}."
+    return "medium", "Agent requested permission before continuing."
+
+
+def _clip(value: str, max_len: int) -> str:
+    text = " ".join(value.strip().split())
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3] + "..."
 
 
 def _raw_string(raw: object, *keys: str) -> str:

@@ -132,7 +132,63 @@ def test_claude_jsonl_tool_metadata_reaches_session_extras() -> None:
     got = sessions.get("s1")
     assert got is not None
     assert got.extras["tool_name"] == "Edit"
+    assert got.extras["tool_id"] == "t1"
     assert got.extras["file_path"] == "/tmp/work/app.py"
+
+
+def test_claude_jsonl_preserves_user_assistant_and_tool_result_metadata() -> None:
+    events = parse_claude_jsonl_lines(
+        [
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": "Please fix the runtime scanner.",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "I am checking the scanner."}],
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "tool-1",
+                                "content": "pytest passed",
+                            }
+                        ],
+                    },
+                }
+            ),
+        ],
+        session_id="s1",
+        ts_ms=2_000,
+    )
+
+    sessions = SessionStore()
+    approvals = ApprovalStore()
+    reducer = AgentEventReducer(session_store=sessions, approval_store=approvals)
+    for event in events:
+        reducer.apply(event)
+    got = sessions.get("s1")
+
+    assert got is not None
+    assert got.extras["last_user"] == "Please fix the runtime scanner."
+    assert got.extras["last_assistant"] == "I am checking the scanner."
+    assert got.extras["tool_result_id"] == "tool-1"
+    assert got.extras["tool_result"] == "pytest passed"
 
 
 def test_claude_jsonl_incremental_reader_keeps_partial_line(tmp_path) -> None:

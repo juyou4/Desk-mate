@@ -12,7 +12,7 @@ from deskmate_agent.proactive import (
     RuleFilter,
 )
 from deskmate_agent.proactive.cooldown import ONE_DAY_MS
-from deskmate_agent.protocol.state import UserFocus
+from deskmate_agent.protocol.state import Priority, UserFocus
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -42,11 +42,13 @@ def _ctx(
     focus: UserFocus = UserFocus.CASUAL,
     pet_in_nest: bool = False,
     nest_duration_ms: int = 0,
+    current_priority: Priority = Priority.P2,
 ) -> ProactiveContext:
     return ProactiveContext(
         perception=PerceptionSnapshot(idle_ms=idle_ms, focus=focus),
         pet_in_nest=pet_in_nest,
         nest_duration_ms=nest_duration_ms,
+        current_priority=current_priority,
     )
 
 
@@ -148,6 +150,15 @@ def test_rule_filter_blocks_short_idle() -> None:
     result = rules.check(_ctx(idle_ms=10_000))
     assert result.passed is False
     assert result.reason == "idle<60s"
+
+
+def test_rule_filter_blocks_when_high_priority_surface_active() -> None:
+    rules = RuleFilter(CooldownTracker(), min_idle_seconds=60)
+    result = rules.check(
+        _ctx(idle_ms=600_000, current_priority=Priority.P1)
+    )
+    assert result.passed is False
+    assert result.reason == "priority:P1"
 
 
 def test_rule_filter_blocks_cooldown() -> None:

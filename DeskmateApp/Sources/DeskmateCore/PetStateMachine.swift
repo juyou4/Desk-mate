@@ -7,15 +7,18 @@ import Foundation
 /// spinning up any AppKit window. Side-effects (animation restart, bubble
 /// bookkeeping) live in the window layer.
 public enum PetStateMachine {
-    /// Authoritative base mapping from ``AgentMood`` to a requested animation
-    /// name. Character packs may override any of these via manifest states +
-    /// ``CharacterPackManifest.fallbacks``.
+    public static let dozingThresholdMs = 20_000
+    public static let sleepingThresholdMs = 60_000
+
+    /// Authoritative base mapping from ``AgentMood`` to a requested universal
+    /// animation name. Older packs remain supported through
+    /// ``CharacterPackManifest.fallbacks`` (for example `running` -> `working`).
     public static let moodAnimation: [AgentMood: String] = [
         .idle: "idle",
-        .working: "working",
-        .thinking: "thinking",
-        .alert: "alert",
-        .happy: "happy",
+        .working: "running",
+        .thinking: "review",
+        .alert: "waiting",
+        .happy: "jumping",
     ]
 
     public struct Input: Equatable, Sendable {
@@ -102,11 +105,26 @@ public enum PetStateMachine {
         if input.isNesting {
             return "nesting"
         }
+        if canAutoRest(input),
+           input.idleMs >= sleepingThresholdMs {
+            return "sleeping"
+        }
+        if canAutoRest(input),
+           input.idleMs >= dozingThresholdMs {
+            return "dozing"
+        }
         if input.domain.userFocus == .focused && input.domain.agentMood == .idle {
             // Stay out of the way: use ``idle`` but never ``happy``/``alert``.
             return "idle"
         }
         return moodAnimation[input.domain.agentMood] ?? "idle"
+    }
+
+    private static func canAutoRest(_ input: Input) -> Bool {
+        input.domain.agentMood == .idle
+            && input.domain.currentPriority == .p3
+            && input.domain.pendingApprovals.isEmpty
+            && !input.isUserInteracting
     }
 
     private static func resolveEmotion(input: Input) -> String {
@@ -130,6 +148,12 @@ public enum PetStateMachine {
     private static func resolveAttentionLevel(input: Input) -> Double {
         if !input.domain.pendingApprovals.isEmpty {
             return 1.0
+        }
+        if canAutoRest(input), input.idleMs >= sleepingThresholdMs {
+            return 0.05
+        }
+        if canAutoRest(input), input.idleMs >= dozingThresholdMs {
+            return 0.12
         }
         switch input.domain.currentPriority {
         case .p0: return 1.0

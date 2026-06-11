@@ -70,6 +70,32 @@ final class InteractionActionFactoryTests: XCTestCase {
         XCTAssertEqual(a.payload["answer"], .string("Use Cursor"))
     }
 
+    // MARK: - openTaskDetail
+
+    func testOpenTaskDetail() {
+        let a = InteractionActionFactory.openTaskDetail(id: "task-7")
+        XCTAssertEqual(a.source, .menuBar)
+        XCTAssertEqual(a.target, .skill)
+        XCTAssertEqual(a.kind, .taskOpenDetail)
+        XCTAssertEqual(a.payload["task_id"], .string("task-7"))
+    }
+
+    func testTaskControlActions() {
+        let cases: [(InteractionAction, InteractionKind)] = [
+            (InteractionActionFactory.startTask(id: "task-7"), .taskStart),
+            (InteractionActionFactory.pauseTask(id: "task-7"), .taskPause),
+            (InteractionActionFactory.advanceTask(id: "task-7"), .taskAdvance),
+            (InteractionActionFactory.completeTask(id: "task-7"), .taskComplete),
+        ]
+        for (action, kind) in cases {
+            XCTAssertEqual(action.source, .menuBar)
+            XCTAssertEqual(action.target, .skill)
+            XCTAssertEqual(action.kind, kind)
+            XCTAssertEqual(action.payload["task_id"], .string("task-7"))
+            XCTAssertEqual(action.payload.keys.sorted(), ["task_id"])
+        }
+    }
+
     // MARK: - demoTrigger
 
     func testDemoTrigger() {

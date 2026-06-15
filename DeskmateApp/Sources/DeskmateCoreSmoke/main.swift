@@ -702,10 +702,10 @@ runner.test("pack: missing required states reported") {
     )
 }
 
-runner.test("pack: bundled pixel_default has every frame on disk") {
+runner.test("pack: bundled built-in pack has every frame on disk") {
     // V10 L1-D / A1+A13: the shipped pack must round-trip through the
     // loader as ``isFullyResolved``. Walk up from this Swift source
-    // file to the repo's ``assets/packs/pixel_default`` directory.
+    // file to the repo's built-in pack directory.
     let smokeFile = URL(fileURLWithPath: #file)
     let bundled = smokeFile
         .deletingLastPathComponent()  // DeskmateCoreSmoke
@@ -734,7 +734,7 @@ runner.test("pack: bundled pixel_default has every frame on disk") {
     )
     try runner.expect(
         loaded.isFullyResolved,
-        "bundled pixel_default pack should be fully resolved"
+        "bundled built-in pack should be fully resolved"
     )
 }
 
@@ -4527,6 +4527,21 @@ runner.test("pack_registry: selectActivePack falls back to builtin") {
     try runner.expect(
         picked?.manifest.id == CharacterPackEnv.builtinPackId,
         "should fall back to builtin, got \(String(describing: picked?.manifest.id))"
+    )
+}
+
+runner.test("pack_registry: selectActivePack falls back to legacy pixel pack") {
+    let root = try makePacksRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    _ = try makePackOnDisk(id: "extra", in: root)
+    _ = try makePackOnDisk(id: CharacterPackEnv.legacyPixelPackId, in: root)
+    let registry = CharacterPackRegistry(
+        CharacterPackDiscovery.discoverPacks(in: root).packs
+    )
+    let picked = registry.selectActivePack(preferred: "ghost")
+    try runner.expect(
+        picked?.manifest.id == CharacterPackEnv.legacyPixelPackId,
+        "should fall back to legacy pixel pack, got \(String(describing: picked?.manifest.id))"
     )
 }
 

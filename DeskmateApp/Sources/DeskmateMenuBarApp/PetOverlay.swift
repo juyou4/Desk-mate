@@ -29,6 +29,11 @@ struct PetOverlay: View {
     @State private var localOverrideExpiresAt: Date? = nil
     @State private var isUserInteracting = false
     @State private var dragFeedbackOffset: CGSize = .zero
+    @State private var dragBaselineTranslation: CGSize? = nil
+
+    private let dragStartThreshold: CGFloat = 14
+    private let overlayWidth: CGFloat = 380
+    private let overlayHeight: CGFloat = 340
 
     private let localTick = Timer.publish(
         every: 1,
@@ -49,8 +54,9 @@ struct PetOverlay: View {
     }
 
     var body: some View {
-        VStack(alignment: .trailing, spacing: 10) {
-            if let bubble = runtime.currentBubble {
+        ZStack(alignment: .bottomTrailing) {
+            if let bubble = runtime.currentBubble,
+               !runtime.isPetBubbleCollapsed {
                 BubbleView(
                     bubble: bubble,
                     onAction: { action in
@@ -62,15 +68,19 @@ struct PetOverlay: View {
                         runtime.sendUserMessage(message)
                     }
                 )
+                .padding(.trailing, 12)
+                .padding(.bottom, 124)
                 .transition(
                     .scale(scale: 0.8, anchor: .bottomTrailing)
                         .combined(with: .opacity)
                 )
             }
             petSprite
+                .padding(12)
         }
-        .padding(12)
+        .frame(width: overlayWidth, height: overlayHeight, alignment: .bottomTrailing)
         .animation(.spring(duration: 0.3), value: runtime.currentBubble?.id)
+        .animation(.spring(duration: 0.22), value: runtime.isPetBubbleCollapsed)
         .onReceive(localTick) { tick in
             now = tick
         }
@@ -98,7 +108,7 @@ struct PetOverlay: View {
         .contentShape(Circle())
         .onTapGesture(perform: handlePetTap)
         .simultaneousGesture(
-            DragGesture(minimumDistance: 4)
+            DragGesture(minimumDistance: dragStartThreshold)
                 .onChanged(handlePetDragChanged(_:))
                 .onEnded(handlePetDragEnded(_:))
         )
@@ -184,7 +194,11 @@ struct PetOverlay: View {
     private func handlePetTap() {
         let wasAutoResting = isAutoResting
         noteUserInteraction()
-        runtime.clickPet()
+        if runtime.currentBubble != nil {
+            runtime.togglePetBubbleCollapsed()
+        } else {
+            runtime.clickPet()
+        }
         setLocalAnimationOverride(
             wasAutoResting ? "waking" : "react-click",
             duration: wasAutoResting ? 1.4 : 1.8
@@ -193,14 +207,19 @@ struct PetOverlay: View {
 
     private func handlePetDragChanged(_ value: DragGesture.Value) {
         noteUserInteraction()
-        if !isUserInteracting {
-            onPetDragBegan()
+        guard dragDistance(value.translation) >= dragStartThreshold else {
+            return
         }
-        isUserInteracting = true
-        onPetDragChanged(value.translation)
+        if !isUserInteracting {
+            dragBaselineTranslation = value.translation
+            onPetDragBegan()
+            isUserInteracting = true
+        }
+        let translation = effectiveDragTranslation(value.translation)
+        onPetDragChanged(translation)
         dragFeedbackOffset = CGSize(
-            width: max(-12, min(12, value.translation.width * 0.16)),
-            height: max(-10, min(10, value.translation.height * 0.16))
+            width: max(-12, min(12, translation.width * 0.16)),
+            height: max(-10, min(10, translation.height * 0.16))
         )
     }
 
@@ -209,10 +228,27 @@ struct PetOverlay: View {
         let wasInteracting = isUserInteracting
         isUserInteracting = false
         dragFeedbackOffset = .zero
+        dragBaselineTranslation = nil
         if wasInteracting {
             onPetDragEnded()
+            setLocalAnimationOverride("waking", duration: 0.9)
         }
-        setLocalAnimationOverride("waking", duration: 0.9)
+    }
+
+    private func dragDistance(_ translation: CGSize) -> CGFloat {
+        let width = translation.width
+        let height = translation.height
+        return (width * width + height * height).squareRoot()
+    }
+
+    private func effectiveDragTranslation(_ translation: CGSize) -> CGSize {
+        guard let baseline = dragBaselineTranslation else {
+            return translation
+        }
+        return CGSize(
+            width: translation.width - baseline.width,
+            height: translation.height - baseline.height
+        )
     }
 
     private func setLocalAnimationOverride(_ state: String, duration: TimeInterval) {

@@ -12,6 +12,8 @@ final class PetWindowController {
     private let runtime: DeskmateMenuBarRuntime
     private var window: NSWindow?
     private var dragStartFrame: NSRect?
+    private var observedResetToken = 0
+    private var resetTimer: Timer?
     private let edgeMargin: CGFloat = 16
     private let defaults: UserDefaults
 
@@ -41,7 +43,7 @@ final class PetWindowController {
                 }
             )
         )
-        host.frame = NSRect(x: 0, y: 0, width: 380, height: 420)
+        host.frame = NSRect(x: 0, y: 0, width: 380, height: 340)
 
         let w = PetOverlayWindow(
             contentRect: host.frame,
@@ -71,11 +73,23 @@ final class PetWindowController {
         restoreOrPositionAtDefault(window: w)
         w.orderFrontRegardless()
         self.window = w
+        startResetObserver()
     }
 
     func close() {
+        resetTimer?.invalidate()
+        resetTimer = nil
         window?.orderOut(nil)
         window = nil
+    }
+
+    func resetPosition() {
+        defaults.removeObject(forKey: DefaultsKey.originX)
+        defaults.removeObject(forKey: DefaultsKey.originY)
+        guard let window else { return }
+        if let origin = geometry(for: window).defaultOrigin()?.origin {
+            setWindowOrigin(origin, window: window, persist: false)
+        }
     }
 
     private func beginPetDrag() {
@@ -146,6 +160,21 @@ final class PetWindowController {
             petSize: w.frame.size,
             edgeMargin: edgeMargin
         )
+    }
+
+    private func startResetObserver() {
+        observedResetToken = runtime.petPositionResetToken
+        resetTimer?.invalidate()
+        resetTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) {
+            [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                let token = self.runtime.petPositionResetToken
+                guard token != self.observedResetToken else { return }
+                self.observedResetToken = token
+                self.resetPosition()
+            }
+        }
     }
 }
 

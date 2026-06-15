@@ -448,6 +448,12 @@ struct DeskmateMenuContent: View {
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
+                Divider()
+                Text(runtime.characterPackDiagnostics)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.top, 4)
         } label: {
@@ -465,6 +471,9 @@ struct DeskmateMenuContent: View {
     private var footer: some View {
         HStack {
             Button("Poke pet") { runtime.clickPet() }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            Button("Reset pet") { runtime.resetPetPosition() }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
             Button {

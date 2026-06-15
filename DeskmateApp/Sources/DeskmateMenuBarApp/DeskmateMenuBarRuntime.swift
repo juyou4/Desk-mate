@@ -23,10 +23,13 @@ public final class DeskmateMenuBarRuntime: ObservableObject {
     @Published public var tasks: [TaskRow] = []
     @Published public var island: LiveIslandSurfaceStore.ChangeEvent? = nil
     @Published public var currentBubble: BubbleSpec? = nil
+    @Published public var isPetBubbleCollapsed: Bool = false
     @Published public var chatHistory: [ChatEntry] = []
     @Published public var activeCharacterPack: CharacterPackLoader.LoadedPack? = nil
     @Published public var activeAvatarStyle: String = "pixel"
     @Published public var petAnimationOverride: String? = nil
+    @Published public var characterPackDiagnostics: String = "pack=<none>"
+    @Published public var petPositionResetToken: Int = 0
     @Published public var islandDiagnostics: String = "screen=<pending>"
     @Published public var islandSurfaceDiagnostics: String = "surface=<pending>"
 
@@ -127,6 +130,7 @@ public final class DeskmateMenuBarRuntime: ObservableObject {
         self.activeCharacterPack = activePack
         self.activeAvatarStyle = activePack?.manifest.avatar.defaultStyle
             ?? Self.resolveActiveAvatarStyle()
+        self.characterPackDiagnostics = Self.describeCharacterPack(activePack)
         installSubscriptions()
         refreshIslandSurfaceDiagnostics()
         installLifecycleObservers()
@@ -215,6 +219,9 @@ public final class DeskmateMenuBarRuntime: ObservableObject {
             let bubble = queue.peek(nowMs: nowMs)
             DispatchQueue.main.async {
                 guard let self else { return }
+                if bubble?.id != self.currentBubble?.id {
+                    self.isPetBubbleCollapsed = false
+                }
                 self.currentBubble = bubble
                 if let b = bubble,
                    self.historyBuffer.recordBubbleIfChatLike(
@@ -398,6 +405,15 @@ public final class DeskmateMenuBarRuntime: ObservableObject {
         try? shell.sendUserClickPet()
     }
 
+    public func togglePetBubbleCollapsed() {
+        guard currentBubble != nil else { return }
+        isPetBubbleCollapsed.toggle()
+    }
+
+    public func resetPetPosition() {
+        petPositionResetToken += 1
+    }
+
     /// Send a free-form user message and mirror it into the local
     /// chat history ribbon so the ribbon always leads with the most
     /// recent user turn (the pet's reply lands via the bubble
@@ -405,6 +421,7 @@ public final class DeskmateMenuBarRuntime: ObservableObject {
     public func sendUserMessage(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        isPetBubbleCollapsed = false
         try? shell.sendUserMessage(trimmed)
         let nowMs = Int(Date().timeIntervalSince1970 * 1000)
         historyBuffer.recordUserMessage(trimmed, at: nowMs)
@@ -566,6 +583,13 @@ public final class DeskmateMenuBarRuntime: ObservableObject {
         )
     }
 
+    private static func describeCharacterPack(
+        _ pack: CharacterPackLoader.LoadedPack?
+    ) -> String {
+        guard let pack else { return "pack=<none>" }
+        return "pack=\(pack.manifest.id)\nroot=\(pack.rootURL.path)"
+    }
+
     private static func decodePetAnimationOverride(
         from intent: CompanionIntent
     ) -> String? {
@@ -595,18 +619,29 @@ public final class DeskmateMenuBarRuntime: ObservableObject {
         }
 
         let cwd = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+        let executable = Bundle.main.executableURL?.deletingLastPathComponent()
+            ?? Bundle.main.bundleURL.deletingLastPathComponent()
         let candidates = [
             cwd.appendingPathComponent("assets/packs"),
             cwd.appendingPathComponent("../assets/packs"),
             Bundle.main.bundleURL
                 .appendingPathComponent("Contents/Resources/packs"),
             Bundle.main.bundleURL.appendingPathComponent("assets/packs"),
+            executable.appendingPathComponent("assets/packs"),
+            executable.appendingPathComponent("../assets/packs"),
+            executable.appendingPathComponent("../../assets/packs"),
+            executable.appendingPathComponent("../../../assets/packs"),
+            executable.appendingPathComponent("../../../../assets/packs"),
         ].map { $0.standardizedFileURL }
 
+        var seen = Set<String>()
         return candidates.filter { url in
             var isDir: ObjCBool = false
-            return fileManager.fileExists(atPath: url.path, isDirectory: &isDir)
+            let exists = fileManager.fileExists(atPath: url.path, isDirectory: &isDir)
                 && isDir.boolValue
+            guard exists, !seen.contains(url.path) else { return false }
+            seen.insert(url.path)
+            return true
         }
     }
 }

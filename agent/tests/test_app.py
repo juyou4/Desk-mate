@@ -146,10 +146,10 @@ async def test_agent_ready_and_snapshot_on_connect(
 
 
 @pytest.mark.asyncio
-async def test_setup_loads_bundled_pixel_default_pack(
+async def test_setup_loads_bundled_native_pack(
     short_socket_path: Path, tmp_path: Path
 ) -> None:
-    """V10 Phase 8: ``App.setup`` should pull in the bundled pixel
+    """V10 Phase 8: ``App.setup`` should pull in the bundled native
     pack via ``AppConfig.extra_pack_roots`` and surface it on the
     runtime so the UI + diagnostics know which pack is active."""
     # Point the primary packs root at an empty tmp dir so the only
@@ -170,8 +170,8 @@ async def test_setup_loads_bundled_pixel_default_pack(
         rt = await app.setup()
         try:
             reg = rt.character_pack_registry
-            assert "pixel_default" in reg.ids(), reg.ids()
-            pack = reg.get("pixel_default")
+            assert "deskmate_native" in reg.ids(), reg.ids()
+            pack = reg.get("deskmate_native")
             assert pack is not None
             assert pack.avatar.default_style == "pixel"
             # The bundled pack supports both styles — Phase 7's

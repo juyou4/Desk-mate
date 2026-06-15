@@ -1,0 +1,230 @@
+{
+  "spec_version": 1,
+  "id": "deskmate_native",
+  "display_name": "Deskmate Native",
+  "author": "Deskmate",
+  "canvas_size": [
+    48,
+    48
+  ],
+  "scale": 1,
+  "palette": [
+    "#1a222a",
+    "#2cb8be",
+    "#5ce0d8",
+    "#f2fcee",
+    "#ffce58",
+    "#ff964e",
+    "#e24a4a",
+    "#9468e8"
+  ],
+  "avatar": {
+    "default_style": "pixel",
+    "supported_styles": [
+      "pixel",
+      "emoji"
+    ]
+  },
+  "states": {
+    "idle": {
+      "fps": 5,
+      "frames": [
+        "idle/000.png",
+        "idle/001.png",
+        "idle/002.png",
+        "idle/003.png",
+        "idle/004.png",
+        "idle/005.png"
+      ]
+    },
+    "running": {
+      "fps": 9,
+      "frames": [
+        "running/000.png",
+        "running/001.png",
+        "running/002.png",
+        "running/003.png"
+      ]
+    },
+    "running-right": {
+      "fps": 9,
+      "frames": [
+        "running-right/000.png",
+        "running-right/001.png",
+        "running-right/002.png",
+        "running-right/003.png"
+      ]
+    },
+    "running-left": {
+      "fps": 9,
+      "frames": [
+        "running-left/000.png",
+        "running-left/001.png",
+        "running-left/002.png",
+        "running-left/003.png"
+      ]
+    },
+    "review": {
+      "fps": 6,
+      "frames": [
+        "review/000.png",
+        "review/001.png",
+        "review/002.png",
+        "review/003.png"
+      ]
+    },
+    "waiting": {
+      "fps": 6,
+      "frames": [
+        "waiting/000.png",
+        "waiting/001.png",
+        "waiting/002.png",
+        "waiting/003.png"
+      ]
+    },
+    "waving": {
+      "fps": 7,
+      "frames": [
+        "waving/000.png",
+        "waving/001.png",
+        "waving/002.png",
+        "waving/003.png"
+      ]
+    },
+    "jumping": {
+      "fps": 8,
+      "frames": [
+        "jumping/000.png",
+        "jumping/001.png",
+        "jumping/002.png",
+        "jumping/003.png",
+        "jumping/004.png"
+      ]
+    },
+    "failed": {
+      "fps": 5,
+      "frames": [
+        "failed/000.png",
+        "failed/001.png",
+        "failed/002.png"
+      ]
+    },
+    "dozing": {
+      "fps": 2,
+      "frames": [
+        "dozing/000.png",
+        "dozing/001.png"
+      ]
+    },
+    "sleeping": {
+      "fps": 2,
+      "frames": [
+        "sleeping/000.png",
+        "sleeping/001.png"
+      ]
+    },
+    "waking": {
+      "fps": 6,
+      "frames": [
+        "waking/000.png",
+        "waking/001.png",
+        "waking/002.png"
+      ]
+    },
+    "drag": {
+      "fps": 8,
+      "frames": [
+        "drag/000.png",
+        "drag/001.png"
+      ]
+    },
+    "react-click": {
+      "fps": 8,
+      "frames": [
+        "react-click/000.png",
+        "react-click/001.png",
+        "react-click/002.png"
+      ]
+    },
+    "working": {
+      "fps": 6,
+      "frames": [
+        "working/000.png",
+        "working/001.png"
+      ]
+    },
+    "thinking": {
+      "fps": 5,
+      "frames": [
+        "thinking/000.png",
+        "thinking/001.png"
+      ]
+    },
+    "alert": {
+      "fps": 5,
+      "frames": [
+        "alert/000.png",
+        "alert/001.png"
+      ]
+    },
+    "happy": {
+      "fps": 6,
+      "frames": [
+        "happy/000.png",
+        "happy/001.png"
+      ]
+    }
+  },
+  "required_states": [
+    "idle",
+    "running",
+    "review",
+    "waiting",
+    "waving",
+    "jumping",
+    "failed",
+    "dozing",
+    "sleeping",
+    "waking",
+    "drag",
+    "react-click"
+  ],
+  "bubble_config": {
+    "icon": "chat",
+    "templates": {
+      "greeting": "hi",
+      "idle_nudge": "still here :)"
+    }
+  },
+  "fallbacks": {
+    "working": "running",
+    "thinking": "review",
+    "alert": "waiting",
+    "happy": "jumping",
+    "dozing": "idle",
+    "sleeping": "idle",
+    "waking": "jumping",
+    "drag": "running",
+    "react-click": "waving",
+    "petting": "waving",
+    "editing": "running",
+    "testing": "waiting",
+    "success": "jumping",
+    "error": "failed",
+    "celebrating": "jumping",
+    "notification": "waving",
+    "walking": "running",
+    "walking_left": "running-left",
+    "walking_right": "running-right",
+    "running_left": "running-left",
+    "running_right": "running-right"
+  },
+  "capabilities": [
+    "chat",
+    "proactive_nudge",
+    "universal_sprite_states",
+    "direct_reactions",
+    "auto_rest",
+    "native_sprite"
+  ]
+}

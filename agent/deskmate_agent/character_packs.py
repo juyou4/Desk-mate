@@ -46,9 +46,13 @@ DEFAULT_PACKS_DIR_ENV = "DESKMATE_PACKS_DIR"
 #: the first registered pack.
 ACTIVE_PACK_ENV = "DESKMATE_CHARACTER_PACK"
 
-#: The id the built-in "pixel" pack advertises; kept as a module
+#: The id the primary built-in pack advertises; kept as a module
 #: constant so tests and production pick from the same source.
-BUILTIN_PACK_ID = "pixel_default"
+BUILTIN_PACK_ID = "deskmate_native"
+
+#: Lightweight legacy fallback kept for older installs and low-resource
+#: environments.
+LEGACY_PIXEL_PACK_ID = "pixel_default"
 
 
 class CharacterPackError(ValueError):
@@ -253,7 +257,7 @@ class CharacterPackRegistry:
         self,
         preferred_id: str | None = None,
         *,
-        fallback_order: Sequence[str] = (BUILTIN_PACK_ID,),
+        fallback_order: Sequence[str] = (BUILTIN_PACK_ID, LEGACY_PIXEL_PACK_ID),
     ) -> CharacterPackManifest | None:
         """Pick the active pack by priority.
 
@@ -347,6 +351,7 @@ __all__ = [
     "default_packs_dir",
     "discover_packs",
     "load_manifest",
+    "LEGACY_PIXEL_PACK_ID",
     "PackDiscoveryResult",
     "resolve_active_pack",
     "DEFAULT_REQUIRED_STATES",

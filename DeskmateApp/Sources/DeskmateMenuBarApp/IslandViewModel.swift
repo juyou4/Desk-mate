@@ -49,6 +49,7 @@ final class IslandViewModel: ObservableObject {
         runtime.$island.sink(receiveValue: recomputeSink).store(in: &cancellables)
         runtime.$sessions.sink(receiveValue: recomputeSink).store(in: &cancellables)
         runtime.$approvals.sink(receiveValue: recomputeSink).store(in: &cancellables)
+        runtime.$reminders.sink(receiveValue: recomputeSink).store(in: &cancellables)
         runtime.$tasks.sink(receiveValue: recomputeSink).store(in: &cancellables)
         runtime.$bridgeState
             .map { _ in () as Any }
@@ -79,6 +80,7 @@ final class IslandViewModel: ObservableObject {
             islandState: runtime.island?.state,
             sessions: runtime.sessions,
             approvals: runtime.approvals,
+            reminders: runtime.reminders,
             tasks: runtime.tasks
         )
     }

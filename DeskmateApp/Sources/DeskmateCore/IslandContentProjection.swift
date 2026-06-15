@@ -10,6 +10,7 @@ public enum IslandContent: Equatable, Sendable {
     case multiSession(sessions: [SessionRow], focus: SessionRow?)
     case approval(session: SessionRow?, approval: ApprovalRow)
     case task(TaskRow)
+    case reminder(ReminderRow)
     case notification(state: IslandSurfaceState)
 }
 
@@ -26,6 +27,7 @@ public enum IslandContentProjection {
         islandState: IslandSurfaceState?,
         sessions: [SessionRow],
         approvals: [ApprovalRow],
+        reminders: [ReminderRow] = [],
         tasks: [TaskRow] = [],
         nowMs: Int = Int(Date().timeIntervalSince1970 * 1000),
         showClosedAfterMs: Int? = 5 * 60 * 1000
@@ -56,6 +58,14 @@ public enum IslandContentProjection {
             return .notification(state: state)
         }
 
+        let visibleReminders = ReminderListAdapter(maxRows: 3)
+            .display(reminders: reminders, nowMs: nowMs)
+        if let urgentReminder = visibleReminders.first(where: {
+            $0.status == .fired || ($0.status == .pending && $0.dueAtMs <= nowMs)
+        }) {
+            return .reminder(urgentReminder)
+        }
+
         let visible = SessionListAdapter(maxRows: 5, showClosedAfterMs: showClosedAfterMs)
             .display(sessions: sessions, nowMs: nowMs)
         if visible.count >= 2 {
@@ -71,6 +81,10 @@ public enum IslandContentProjection {
             return .task(task)
         }
 
+        if let nextReminder = visibleReminders.first(where: { $0.status == .pending }) {
+            return .reminder(nextReminder)
+        }
+
         return .idle
     }
 }
@@ -84,7 +98,7 @@ extension IslandContent {
             return focus
         case .approval(let session, _):
             return session
-        case .idle, .build, .task, .notification:
+        case .idle, .build, .task, .reminder, .notification:
             return nil
         }
     }
@@ -111,6 +125,11 @@ extension IslandContent {
 
     public var activeTask: TaskRow? {
         if case .task(let task) = self { return task }
+        return nil
+    }
+
+    public var activeReminder: ReminderRow? {
+        if case .reminder(let reminder) = self { return reminder }
         return nil
     }
 }

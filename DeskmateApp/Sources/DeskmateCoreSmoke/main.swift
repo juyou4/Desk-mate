@@ -2110,6 +2110,66 @@ runner.test("island content projection: notification beats active task") {
     try runner.expect(state.activityId == "reminder-1", "notification id mismatch")
 }
 
+runner.test("island content projection: due reminder beats ordinary session") {
+    let reminder = ReminderRow(
+        reminderId: "rem-1",
+        text: "Drink water",
+        dueAtMs: 900,
+        status: .pending
+    )
+    let content = IslandContentProjection.compute(
+        islandState: nil,
+        sessions: [smokeSessionRow("s1", phase: .running)],
+        approvals: [],
+        reminders: [reminder],
+        nowMs: 1_000
+    )
+    guard case .reminder(let row) = content else {
+        throw SmokeError.expectation("expected reminder content, got \(content)")
+    }
+    try runner.expect(row.reminderId == "rem-1", "reminder id mismatch")
+}
+
+runner.test("island content projection: future reminder waits behind active session") {
+    let reminder = ReminderRow(
+        reminderId: "rem-1",
+        text: "Drink water",
+        dueAtMs: 10_000,
+        status: .pending
+    )
+    let content = IslandContentProjection.compute(
+        islandState: nil,
+        sessions: [smokeSessionRow("s1", phase: .running)],
+        approvals: [],
+        reminders: [reminder],
+        nowMs: 1_000
+    )
+    guard case .session(let row) = content else {
+        throw SmokeError.expectation("expected session content, got \(content)")
+    }
+    try runner.expect(row.sessionId == "s1", "session id mismatch")
+}
+
+runner.test("island content projection: idle gap can show next reminder") {
+    let reminder = ReminderRow(
+        reminderId: "rem-1",
+        text: "Drink water",
+        dueAtMs: 10_000,
+        status: .pending
+    )
+    let content = IslandContentProjection.compute(
+        islandState: nil,
+        sessions: [],
+        approvals: [],
+        reminders: [reminder],
+        nowMs: 1_000
+    )
+    guard case .reminder(let row) = content else {
+        throw SmokeError.expectation("expected reminder content, got \(content)")
+    }
+    try runner.expect(row.reminderId == "rem-1", "reminder id mismatch")
+}
+
 // --- Phase 5: ReminderRow + ReminderListAdapter (L2-#4) ---------------------
 
 func smokeReminder(

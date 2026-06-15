@@ -230,11 +230,14 @@ struct IslandOverlay: View {
             if !agentHealthSummary.isEmpty {
                 agentHealthStrip
             }
-            if visibleSessions.isEmpty {
+            if visibleSessions.isEmpty && visibleReminderRows.isEmpty {
                 emptyExpandedState
             } else {
                 ScrollView {
                     VStack(spacing: 6) {
+                        ForEach(visibleReminderRows, id: \.reminderId) { reminder in
+                            reminderRow(reminder)
+                        }
                         ForEach(visibleSessions, id: \.sessionId) { session in
                             sessionRow(session)
                         }
@@ -389,6 +392,57 @@ struct IslandOverlay: View {
                         ? phaseColor(for: session).opacity(0.3)
                         : Color.white.opacity(0.05)
                 )
+        )
+    }
+
+    private func reminderRow(_ reminder: ReminderRow) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            ZStack {
+                Circle()
+                    .fill(reminderColor(for: reminder).opacity(0.16))
+                    .frame(width: 24, height: 24)
+                Image(systemName: reminderIcon(for: reminder))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(reminderColor(for: reminder))
+            }
+            .padding(.top, 1)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(reminder.text.isEmpty ? "Reminder" : reminder.text)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                Text(reminderDueLabel(reminder))
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.44))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+
+            Spacer(minLength: 4)
+
+            Text(reminderStatusLabel(reminder).uppercased())
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(reminderColor(for: reminder))
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(reminderColor(for: reminder).opacity(0.12))
+                )
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.white.opacity(reminder.status == .fired ? 0.06 : 0.03))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(reminderColor(for: reminder).opacity(0.18), lineWidth: 0.5)
         )
     }
 
@@ -639,6 +693,8 @@ struct IslandOverlay: View {
                 .animation(.spring(duration: 0.3), value: isBuildDoneState)
             } else if shouldShowFullCompactLabels {
                 compactPeekTrailingModule
+            } else if let reminder = activeReminder {
+                reminderCompactTrailing(reminder)
             } else if let session = focusSession,
                       shouldPrioritizePhaseInCompact(session) {
                 compactPhasePill(session)
@@ -685,6 +741,8 @@ struct IslandOverlay: View {
                 secondary: notificationPeekSecondary(notification),
                 color: .yellow
             )
+        } else if let reminder = activeReminder {
+            reminderCompactTrailing(reminder)
         } else if let session = focusSession {
             compactPeekText(
                 icon: sessionActivityIcon(session),
@@ -711,6 +769,25 @@ struct IslandOverlay: View {
             secondary: taskCompactSecondary(task),
             color: .cyan
         )
+    }
+
+    private func reminderCompactTrailing(_ reminder: ReminderRow) -> some View {
+        compactPeekText(
+            icon: reminderIcon(for: reminder),
+            primary: reminderCompactPrimary(reminder),
+            secondary: reminderCompactSecondary(reminder),
+            color: reminderColor(for: reminder)
+        )
+    }
+
+    private func reminderCompactPrimary(_ reminder: ReminderRow) -> String {
+        let text = reminder.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty { return reminderStatusLabel(reminder).uppercased() }
+        return truncateForPill(text.uppercased(), maxChars: 20)
+    }
+
+    private func reminderCompactSecondary(_ reminder: ReminderRow) -> String? {
+        truncateForPill(reminderDueLabel(reminder), maxChars: 24)
     }
 
     private func taskCompactPrimary(_ task: TaskRow) -> String {
@@ -1020,6 +1097,7 @@ struct IslandOverlay: View {
             || activeIslandKindRequiresCompactPresence
             || !runtime.sessions.isEmpty
             || !runtime.approvals.isEmpty
+            || activeReminder != nil
             || activeTask != nil
     }
 
@@ -1058,6 +1136,11 @@ struct IslandOverlay: View {
             .display(sessions: runtime.sessions, nowMs: nowMs())
     }
 
+    private var visibleReminderRows: [ReminderRow] {
+        ReminderListAdapter(maxRows: 3)
+            .display(reminders: runtime.reminders, nowMs: nowMs())
+    }
+
     private var actionableSession: SessionRow? {
         visibleSessions.first { $0.needsUserAction }
     }
@@ -1074,6 +1157,10 @@ struct IslandOverlay: View {
         viewModel.content.activeTask
     }
 
+    private var activeReminder: ReminderRow? {
+        viewModel.content.activeReminder
+    }
+
     private var chipColor: Color {
         switch runtime.bridgeState {
         case .stopped: return .red
@@ -1082,6 +1169,9 @@ struct IslandOverlay: View {
             if activeNotification != nil { return .yellow }
             if let approval = runtime.approvals.first {
                 return approvalUrgencyColor(approval)
+            }
+            if let reminder = activeReminder {
+                return reminderColor(for: reminder)
             }
             if let session = focusSession { return phaseColor(for: session) }
             if activeTask != nil { return .cyan }
@@ -1097,6 +1187,10 @@ struct IslandOverlay: View {
         guard runtime.bridgeState == .connected else { return false }
         if !runtime.approvals.isEmpty { return true }
         if activeNotification != nil { return true }
+        if let reminder = activeReminder {
+            return reminder.status == .fired
+                || (reminder.status == .pending && reminder.dueAtMs <= nowMs())
+        }
         if let session = focusSession {
             return session.phase != .completed
                 && session.phase != .failed
@@ -1150,6 +1244,7 @@ struct IslandOverlay: View {
 
     private var headerTitle: String {
         if !runtime.approvals.isEmpty { return "Action needed" }
+        if activeReminder != nil { return "Reminders" }
         if activeSessionCount > 0 { return "Agent sessions" }
         if activeTask != nil { return "Active task" }
         return "Deskmate Island"
@@ -1161,6 +1256,7 @@ struct IslandOverlay: View {
            activeIslandKindRequiresCompactPresence {
             return descriptor.title
         }
+        if activeReminder != nil { return "REM" }
         if let session = focusSession {
             let source = session.sourceLabel ?? session.source ?? "agent"
             return shouldShowFullCompactLabels ? fullSourceName(source).uppercased() : compactSourceCode(source)
@@ -1180,6 +1276,9 @@ struct IslandOverlay: View {
         if let descriptor = activeModuleDescriptor,
            activeIslandKindRequiresCompactPresence {
             return descriptor.subtitle.map { truncateForPill($0, maxChars: 14) }
+        }
+        if let reminder = activeReminder {
+            return reminderStatusLabel(reminder).lowercased()
         }
         if let session = focusSession {
             return shouldShowFullCompactLabels
@@ -1275,6 +1374,7 @@ struct IslandOverlay: View {
     }
 
     private var compactSourceLabel: String {
+        if activeReminder != nil { return "rem" }
         if let session = focusSession {
             return compactSourceCode(session.sourceLabel ?? session.source ?? "agent")
         }
@@ -1480,6 +1580,68 @@ struct IslandOverlay: View {
             createdAtMs: approval.createdAtMs,
             nowMs: nowMs()
         ).foreground
+    }
+
+    private func reminderColor(for reminder: ReminderRow) -> Color {
+        switch reminder.status {
+        case .fired:
+            return .orange
+        case .pending:
+            return reminder.dueAtMs <= nowMs() ? .orange : .yellow
+        case .dismissed, .cancelled:
+            return .gray
+        case .unknown:
+            return .yellow
+        }
+    }
+
+    private func reminderIcon(for reminder: ReminderRow) -> String {
+        switch reminder.status {
+        case .fired:
+            return "bell.badge.fill"
+        case .pending:
+            return reminder.dueAtMs <= nowMs() ? "bell.badge.fill" : "bell.fill"
+        case .dismissed:
+            return "checkmark.circle.fill"
+        case .cancelled:
+            return "xmark.circle.fill"
+        case .unknown:
+            return "bell"
+        }
+    }
+
+    private func reminderStatusLabel(_ reminder: ReminderRow) -> String {
+        switch reminder.status {
+        case .fired:
+            return "due"
+        case .pending:
+            return reminder.dueAtMs <= nowMs() ? "due" : "next"
+        case .dismissed:
+            return "done"
+        case .cancelled:
+            return "cancelled"
+        case .unknown:
+            return "reminder"
+        }
+    }
+
+    private func reminderDueLabel(_ reminder: ReminderRow) -> String {
+        let due = reminder.dueAtMs
+        guard due > 0 else { return reminderStatusLabel(reminder) }
+        let delta = due - nowMs()
+        if reminder.status == .fired || delta <= 0 {
+            let overdue = abs(delta)
+            if overdue < 60_000 { return "due now" }
+            let minutes = overdue / 60_000
+            if minutes < 60 { return "due \(minutes)m ago" }
+            return "due \(minutes / 60)h ago"
+        }
+        if delta < 60_000 { return "in <1m" }
+        let minutes = delta / 60_000
+        if minutes < 60 { return "in \(minutes)m" }
+        let hours = minutes / 60
+        if hours < 24 { return "in \(hours)h" }
+        return "in \(hours / 24)d"
     }
 
     /// V10 #4: phases where work is actively progressing — show

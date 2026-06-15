@@ -98,6 +98,69 @@ final class IslandContentProjectionTests: XCTestCase {
         XCTAssertEqual(state.activityId, "reminder-1")
     }
 
+    func testDueReminderBeatsOrdinarySession() {
+        let reminder = ReminderRow(
+            reminderId: "rem-1",
+            text: "Drink water",
+            dueAtMs: 900,
+            status: .pending
+        )
+        let content = IslandContentProjection.compute(
+            islandState: nil,
+            sessions: [SessionRow(sessionId: "s1", phase: .running)],
+            approvals: [],
+            reminders: [reminder],
+            nowMs: 1_000
+        )
+
+        guard case .reminder(let row) = content else {
+            return XCTFail("expected reminder, got \(content)")
+        }
+        XCTAssertEqual(row.reminderId, "rem-1")
+    }
+
+    func testFutureReminderWaitsBehindActiveSession() {
+        let reminder = ReminderRow(
+            reminderId: "rem-1",
+            text: "Drink water",
+            dueAtMs: 10_000,
+            status: .pending
+        )
+        let content = IslandContentProjection.compute(
+            islandState: nil,
+            sessions: [SessionRow(sessionId: "s1", phase: .running)],
+            approvals: [],
+            reminders: [reminder],
+            nowMs: 1_000
+        )
+
+        guard case .session(let row) = content else {
+            return XCTFail("expected session, got \(content)")
+        }
+        XCTAssertEqual(row.sessionId, "s1")
+    }
+
+    func testFutureReminderShowsWhenIslandOtherwiseIdle() {
+        let reminder = ReminderRow(
+            reminderId: "rem-1",
+            text: "Drink water",
+            dueAtMs: 10_000,
+            status: .pending
+        )
+        let content = IslandContentProjection.compute(
+            islandState: nil,
+            sessions: [],
+            approvals: [],
+            reminders: [reminder],
+            nowMs: 1_000
+        )
+
+        guard case .reminder(let row) = content else {
+            return XCTFail("expected reminder, got \(content)")
+        }
+        XCTAssertEqual(row.reminderId, "rem-1")
+    }
+
     func testClosedSessionsDoNotCreateContent() {
         let content = IslandContentProjection.compute(
             islandState: nil,

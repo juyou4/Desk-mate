@@ -100,6 +100,10 @@
   - `question.answer`
   - `session.jump`
   - `task.open_detail`
+  - `task.start`
+  - `task.pause`
+  - `task.advance`
+  - `task.complete`
   - `surface.dismiss`
   - `demo.trigger`
   - `pet.interact`
@@ -116,6 +120,17 @@
 `scenario` 当前支持 `build | approval | reminder | codex_session | clear`。
 
 > **禁止**使用旧式 `user.island_action { id, action: "join" }` 字符串动作（V10 L1-F）。
+
+`task.open_detail` / `task.start` / `task.pause` / `task.advance` /
+`task.complete` 固定由任务列表或任务气泡发出，`target` 为 `skill`，payload:
+
+```json
+{ "task_id": "task-abc" }
+```
+
+这些动作只操作 `tasks.db` 中仍处于 `open | in_progress` 的用户可见任务。Python
+执行后通过 `show_pet_bubble` / `present_island` 给用户反馈，并在 `active_tasks`
+投影发生变化时推送新的 `state.snapshot`。
 
 ---
 
@@ -256,6 +271,54 @@ deskmate island module register kiro.spec \
 ```
 
 默认队列目录为 `~/.deskmate/module-registrations/`，可用 `DESKMATE_MODULE_REGISTRATIONS_DIR` 覆盖。常驻 Python agent 消费后发送 typed `register_module` intent；同一个 `id` 的最新 spec 会在 Swift 重连时重放，避免 UI 断线后丢失外部模块。
+
+---
+
+## 6b.2 `state.snapshot.active_tasks`
+
+`state.snapshot` 可选携带 `active_tasks`，用于 Swift 在重连后恢复用户可见任务 lane。该字段只投影 `tasks.db` 中仍处于 `open | in_progress` 的 Deskmate 任务，不代表 LLM tool-call 生命周期。
+
+```json
+{
+  "active_tasks": [
+    {
+      "task_id": "task-abc",
+      "conversation_id": "default",
+      "title": "Polish task lane",
+      "status": "in_progress",
+      "notes": "Keep island compact.",
+      "created_at_ms": 1713600000000,
+      "updated_at_ms": 1713600060000,
+      "completed_at_ms": null,
+      "completed_step_count": 1,
+      "total_step_count": 3,
+      "current_step": {
+        "step_id": "step-2",
+        "position": 2,
+        "content": "Expose task snapshot",
+        "status": "in_progress",
+        "active_form": "Exposing task snapshot"
+      },
+      "steps": [
+        {
+          "step_id": "step-1",
+          "task_id": "task-abc",
+          "conversation_id": "default",
+          "position": 1,
+          "content": "Read reference islands",
+          "status": "completed",
+          "active_form": "",
+          "created_at_ms": 1713600000000,
+          "updated_at_ms": 1713600030000,
+          "completed_at_ms": 1713600030000
+        }
+      ]
+    }
+  ]
+}
+```
+
+`completed_step_count` / `total_step_count` 始终基于 Python 读取到的完整 step 列表计算，供 Swift 在 `steps` 被截断时仍显示权威进度。`current_step` 优先取 `in_progress` step，其次取第一个 `pending` step；没有可行动 step 时省略。Python 默认限制 snapshot 中任务数和 step 数，以便重连快照保持轻量。读取任务失败时 agent 必须 fail-soft：该字段回退为空数组，不阻断 `state.snapshot` / `agent.ready`。
 
 ---
 

@@ -11,7 +11,13 @@ from deskmate_agent.approvals import (
 )
 from deskmate_agent.projector import DomainStateProjector
 from deskmate_agent.protocol.intents import CompanionIntent, IntentKind
-from deskmate_agent.sessions import SessionInfo, SessionState, SessionStore
+from deskmate_agent.protocol.state import AgentMood, Priority
+from deskmate_agent.sessions import (
+    SessionInfo,
+    SessionPhase,
+    SessionState,
+    SessionStore,
+)
 
 
 def _approval(aid: str, *, created: int = 1_000) -> Approval:
@@ -99,6 +105,42 @@ async def test_session_store_event_also_triggers_emit() -> None:
 
     assert len(sink.intents) == 1
     assert sink.intents[0].payload["domain_state"]["active_session_id"] == "s1"
+
+
+@pytest.mark.asyncio
+async def test_projection_marks_pending_approval_as_p0_alert() -> None:
+    approvals, _, projector, sink = _build()
+    projector.start()
+
+    approvals.add(_approval("a1"))
+    await projector.flush()
+
+    payload = sink.intents[-1].payload["domain_state"]
+    assert payload["current_priority"] == Priority.P0.value
+    assert payload["agent_mood"] == AgentMood.ALERT.value
+
+
+@pytest.mark.asyncio
+async def test_projection_derives_attention_from_active_session_phase() -> None:
+    _, sessions, projector, sink = _build()
+    projector.start()
+
+    sessions.upsert(
+        SessionInfo(
+            session_id="s1",
+            title="Codex edit",
+            state=SessionState.ACTIVE,
+            priority=Priority.P2,
+            phase=SessionPhase.RUNNING_TOOL,
+            source="codex",
+            updated_at_ms=5_000,
+        )
+    )
+    await projector.flush()
+
+    payload = sink.intents[-1].payload["domain_state"]
+    assert payload["current_priority"] == Priority.P1.value
+    assert payload["agent_mood"] == AgentMood.WORKING.value
 
 
 # ---------------------------------------------------------------------------

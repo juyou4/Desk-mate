@@ -1,8 +1,8 @@
 import Foundation
 
 /// Generic observable wrapper around a list of wire rows (V10 Phase
-/// 11d-iv). Used by the three "list" surfaces — sessions, reminders,
-/// approvals — that Python pushes inside ``state.snapshot`` and (later)
+/// 11d-iv). Used by the "list" surfaces — sessions, reminders,
+/// approvals, tasks — that Python pushes inside ``state.snapshot`` and (later)
 /// via delta intents.
 ///
 /// The API is deliberately tiny: ``current`` for a snapshot read,
@@ -109,6 +109,26 @@ public final class LivePendingApprovalsStore: @unchecked Sendable {
     @discardableResult
     public func subscribe(
         _ cb: @escaping ([ApprovalRow]) -> Void
+    ) -> () -> Void {
+        inner.subscribe(cb)
+    }
+}
+
+/// Observable list of active durable :class:`TaskRow` values. Hydrated
+/// from ``state.snapshot.active_tasks``.
+public final class LiveActiveTasksStore: @unchecked Sendable {
+    private let inner = LiveListStore<TaskRow>()
+
+    public init() {}
+
+    public var current: [TaskRow] { inner.current }
+
+    @discardableResult
+    public func apply(_ rows: [TaskRow]) -> Bool { inner.apply(rows) }
+
+    @discardableResult
+    public func subscribe(
+        _ cb: @escaping ([TaskRow]) -> Void
     ) -> () -> Void {
         inner.subscribe(cb)
     }

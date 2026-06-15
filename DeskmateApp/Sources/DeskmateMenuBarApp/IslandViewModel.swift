@@ -49,6 +49,7 @@ final class IslandViewModel: ObservableObject {
         runtime.$island.sink(receiveValue: recomputeSink).store(in: &cancellables)
         runtime.$sessions.sink(receiveValue: recomputeSink).store(in: &cancellables)
         runtime.$approvals.sink(receiveValue: recomputeSink).store(in: &cancellables)
+        runtime.$tasks.sink(receiveValue: recomputeSink).store(in: &cancellables)
         runtime.$bridgeState
             .map { _ in () as Any }
             .sink(receiveValue: recomputeSink)
@@ -77,7 +78,8 @@ final class IslandViewModel: ObservableObject {
         IslandContentProjection.compute(
             islandState: runtime.island?.state,
             sessions: runtime.sessions,
-            approvals: runtime.approvals
+            approvals: runtime.approvals,
+            tasks: runtime.tasks
         )
     }
 

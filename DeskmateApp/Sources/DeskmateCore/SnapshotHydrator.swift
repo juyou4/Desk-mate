@@ -5,7 +5,8 @@ import Foundation
 ///
 /// The Python agent publishes a ``state.snapshot`` on every new bridge
 /// connection. It carries ``domain_state``, ``active_sessions``,
-/// ``pending_reminders``, ``pending_approvals_detail`` so the Swift
+/// ``pending_reminders``, ``pending_approvals_detail``, and
+/// ``active_tasks`` so the Swift
 /// side can reach a correct onboarding view without waiting for delta
 /// intents to arrive. This class subscribes to a
 /// :class:`EnvelopeReceiver`, filters for ``.stateSnapshot`` envelopes,
@@ -22,6 +23,7 @@ public final class SnapshotHydrator {
     private let sessionStore: LiveSessionListStore?
     private let reminderStore: LivePendingRemindersStore?
     private let approvalStore: LivePendingApprovalsStore?
+    private let taskStore: LiveActiveTasksStore?
     private let callbackQueue: DispatchQueue
     private let queue = DispatchQueue(label: "deskmate.snapshot.hydrator")
     private var onSnapshotSubs: [UUID: RawSnapshotCallback] = [:]
@@ -33,12 +35,14 @@ public final class SnapshotHydrator {
         sessionStore: LiveSessionListStore? = nil,
         reminderStore: LivePendingRemindersStore? = nil,
         approvalStore: LivePendingApprovalsStore? = nil,
+        taskStore: LiveActiveTasksStore? = nil,
         callbackQueue: DispatchQueue = .main
     ) {
         self.domainStore = domainStore
         self.sessionStore = sessionStore
         self.reminderStore = reminderStore
         self.approvalStore = approvalStore
+        self.taskStore = taskStore
         self.callbackQueue = callbackQueue
     }
 
@@ -125,6 +129,17 @@ public final class SnapshotHydrator {
                 field: "pending_approvals_detail",
                 in: envelope.payload,
                 as: [ApprovalRow].self
+            ) { rows in
+                store.apply(rows)
+            }
+        }
+
+        // --- Active durable tasks list -----------------------------------
+        if let store = taskStore {
+            decodeAndApply(
+                field: "active_tasks",
+                in: envelope.payload,
+                as: [TaskRow].self
             ) { rows in
                 store.apply(rows)
             }

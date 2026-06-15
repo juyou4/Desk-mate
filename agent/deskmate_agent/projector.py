@@ -25,10 +25,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 
+from .agent_phase import presentation_for_phase
 from .approvals import ApprovalStore, ApprovalStoreEvent
 from .logging_setup import get_logger
 from .protocol.intents import CompanionIntent, IntentKind
-from .protocol.state import DomainState
+from .protocol.state import AgentMood, DomainState, Priority
 from .sessions import SessionStore, SessionStoreEvent
 
 _LOG = get_logger("deskmate_agent.projector")
@@ -155,13 +156,68 @@ class DomainStateProjector:
         active_session_id = (
             active_sessions[0].session_id if active_sessions else None
         )
+        pending_approvals = list(self._approval_store.pending_ids())
+        current_priority, agent_mood = self._project_attention(
+            pending_approvals=pending_approvals,
+        )
         return DomainState(
-            pending_approvals=list(self._approval_store.pending_ids()),
+            current_priority=current_priority,
+            agent_mood=agent_mood,
+            pending_approvals=pending_approvals,
             active_session_id=active_session_id,
             coding_today_ms=self._coding_today_ms,
             coding_today_by_ide=dict(self._coding_today_by_ide),
             degradation_level=self._degradation_level,
         )
+
+    def _project_attention(
+        self,
+        *,
+        pending_approvals: list[str],
+    ) -> tuple[Priority, AgentMood]:
+        """Derive the global attention level from live approvals/sessions.
+
+        The bridge carries one compact ``DomainState`` to every Swift
+        surface. Pending approvals win outright; otherwise the most
+        actionable active session determines the priority and pet mood.
+        """
+        if pending_approvals:
+            return Priority.P0, AgentMood.ALERT
+
+        sessions = self._session_store.list_active(include_subagents=True)
+        if not sessions:
+            return Priority.P3, AgentMood.IDLE
+
+        best_priority = Priority.P3
+        best_mood = AgentMood.IDLE
+        best_rank = _priority_rank(best_priority)
+        for session in sessions:
+            phase_ui = presentation_for_phase(
+                session.phase,
+                source=session.source or session.kind or "agent",
+                summary=session.summary,
+                title=session.title,
+            )
+            effective_priority = _more_urgent(
+                session.priority,
+                phase_ui.priority,
+            )
+            rank = _priority_rank(effective_priority)
+            if rank < best_rank:
+                best_priority = effective_priority
+                best_mood = _mood_for_pet_state(phase_ui.pet_state)
+                best_rank = rank
+
+        if best_mood is AgentMood.IDLE and sessions:
+            top = sessions[0]
+            phase_ui = presentation_for_phase(
+                top.phase,
+                source=top.source or top.kind or "agent",
+                summary=top.summary,
+                title=top.title,
+            )
+            best_mood = _mood_for_pet_state(phase_ui.pet_state)
+        return best_priority, best_mood
 
     def set_coding_today_ms(self, value: int) -> None:
         """Phase 15-i: update the cached daily coding total.
@@ -222,6 +278,31 @@ class DomainStateProjector:
             kind=IntentKind.UPDATE_DOMAIN_STATE,
             payload={"domain_state": state.model_dump(mode="json")},
         )
+
+
+def _priority_rank(priority: Priority) -> int:
+    return {
+        Priority.P0: 0,
+        Priority.P1: 1,
+        Priority.P2: 2,
+        Priority.P3: 3,
+    }[priority]
+
+
+def _more_urgent(left: Priority, right: Priority) -> Priority:
+    return left if _priority_rank(left) <= _priority_rank(right) else right
+
+
+def _mood_for_pet_state(pet_state: str) -> AgentMood:
+    if pet_state == "alert":
+        return AgentMood.ALERT
+    if pet_state == "thinking":
+        return AgentMood.THINKING
+    if pet_state == "working":
+        return AgentMood.WORKING
+    if pet_state == "happy":
+        return AgentMood.HAPPY
+    return AgentMood.IDLE
 
 
 __all__ = ["DomainStateProjector", "IntentSink"]

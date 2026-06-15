@@ -62,6 +62,52 @@ public enum InteractionActionFactory {
         )
     }
 
+    /// Ask the agent to surface details for a durable Deskmate task.
+    /// Python reads ``task_id`` from the payload and answers through
+    /// the regular pet/island intent path.
+    public static func openTaskDetail(
+        id: String, source: ActionSource = .menuBar
+    ) -> InteractionAction {
+        taskAction(id: id, kind: .taskOpenDetail, source: source)
+    }
+
+    public static func startTask(
+        id: String, source: ActionSource = .menuBar
+    ) -> InteractionAction {
+        taskAction(id: id, kind: .taskStart, source: source)
+    }
+
+    public static func pauseTask(
+        id: String, source: ActionSource = .menuBar
+    ) -> InteractionAction {
+        taskAction(id: id, kind: .taskPause, source: source)
+    }
+
+    public static func advanceTask(
+        id: String, source: ActionSource = .menuBar
+    ) -> InteractionAction {
+        taskAction(id: id, kind: .taskAdvance, source: source)
+    }
+
+    public static func completeTask(
+        id: String, source: ActionSource = .menuBar
+    ) -> InteractionAction {
+        taskAction(id: id, kind: .taskComplete, source: source)
+    }
+
+    private static func taskAction(
+        id: String,
+        kind: InteractionKind,
+        source: ActionSource
+    ) -> InteractionAction {
+        InteractionAction(
+            source: source,
+            target: .skill,
+            kind: kind,
+            payload: ["task_id": .string(id)]
+        )
+    }
+
     public static func dismissSurface(
         surface: IslandSurfaceKind? = nil,
         source: ActionSource = .island

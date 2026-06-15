@@ -107,13 +107,20 @@ def test_swift_send_perception_keys_feed_context_reader() -> None:
 
     # Exercise the actual reader the agent uses at runtime.
     from deskmate_agent.app import _context_from_perception
+    from deskmate_agent.protocol.state import AgentMood, Priority
 
-    ctx = _context_from_perception(env.payload)
+    ctx = _context_from_perception(
+        env.payload,
+        current_priority=Priority.P1,
+        current_mood=AgentMood.WORKING,
+    )
     assert ctx.perception.user_state == "active"
     assert ctx.perception.focus.value == "focused"
     assert ctx.perception.app_bundle_id == "com.apple.Terminal"
     assert ctx.perception.window_title == "bash"
     assert ctx.perception.idle_ms == 1_500
+    assert ctx.current_priority is Priority.P1
+    assert ctx.current_mood is AgentMood.WORKING
 
 
 # ---------------------------------------------------------------------------

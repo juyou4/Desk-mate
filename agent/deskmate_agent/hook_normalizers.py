@@ -227,6 +227,24 @@ def _phase_from(raw: dict[str, Any], *, event: str) -> SessionPhase:
         return SessionPhase.WAITING_FOR_ANSWER
     if any(token in text for token in ("failed", "failure", "error", "denied")):
         return SessionPhase.FAILED
+    if any(
+        token in text
+        for token in (
+            "done",
+            "complete",
+            "completed",
+            "stop",
+            "finish",
+            "finished",
+            "sessionend",
+            "session_end",
+            "session.completed",
+            "tool.end",
+            "tool_end",
+            "posttooluse",
+        )
+    ):
+        return SessionPhase.COMPLETED
     if any(token in text for token in ("thinking", "thought", "reasoning", "userpromptsubmit")):
         return SessionPhase.THINKING
     if any(
@@ -244,8 +262,6 @@ def _phase_from(raw: dict[str, Any], *, event: str) -> SessionPhase:
         for token in ("tool", "bash", "exec", "command", "shell", "read", "grep", "search")
     ):
         return SessionPhase.RUNNING_TOOL
-    if any(token in text for token in ("done", "complete", "stop", "finish", "sessionend")):
-        return SessionPhase.COMPLETED
     return SessionPhase.RUNNING
 
 
@@ -278,12 +294,12 @@ def _codex_summary(
         return "Codex session started."
     if key == "userpromptsubmit":
         return _clip(prompt) or "Codex received a prompt."
-    if key == "pretooluse" or "tool" in key or command or tool_name:
-        return _tool_summary("Codex", event=event, tool_name=tool_name, command=command, prompt=prompt)
     if key == "posttooluse":
         return "Codex finished a tool call."
     if key == "stop":
         return _clip(assistant) or "Codex turn completed."
+    if key == "pretooluse" or "tool" in key or command or tool_name:
+        return _tool_summary("Codex", event=event, tool_name=tool_name, command=command, prompt=prompt)
     return _clip(prompt) or _clip(assistant) or "Codex session updated."
 
 

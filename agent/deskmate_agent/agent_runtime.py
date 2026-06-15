@@ -118,6 +118,10 @@ class AgentRuntimeSource(StrEnum):
 
     # Terminals (often host CLI agents)
     TERMINAL = "terminal"
+    ITERM = "iterm"
+    GHOSTTY = "ghostty"
+    WEZTERM = "wezterm"
+    KITTY = "kitty"
     WARP = "warp"
 
     # V10 kiro-task-observer Requirement 1.1 — Kiro IDE source.
@@ -169,6 +173,7 @@ class ProcessRow:
     ppid: int
     comm: str
     args: str
+    tty: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -565,6 +570,46 @@ _RUNTIME_PATTERNS: tuple[_RuntimePattern, ...] = (
     ),
     # --- Terminals ----------------------------------------------------------
     _RuntimePattern(
+        source=AgentRuntimeSource.TERMINAL,
+        kind=AgentRuntimeKind.GUI_IDE,
+        display_name="Terminal",
+        executables=("terminal",),
+        arg_needles=("terminal.app",),
+        bundle_id="com.apple.Terminal",
+    ),
+    _RuntimePattern(
+        source=AgentRuntimeSource.ITERM,
+        kind=AgentRuntimeKind.GUI_IDE,
+        display_name="iTerm",
+        executables=("iterm2", "iterm"),
+        arg_needles=("iterm.app", "iterm2.app"),
+        bundle_id="com.googlecode.iterm2",
+    ),
+    _RuntimePattern(
+        source=AgentRuntimeSource.GHOSTTY,
+        kind=AgentRuntimeKind.GUI_IDE,
+        display_name="Ghostty",
+        executables=("ghostty",),
+        arg_needles=("ghostty.app",),
+        bundle_id="com.mitchellh.ghostty",
+    ),
+    _RuntimePattern(
+        source=AgentRuntimeSource.WEZTERM,
+        kind=AgentRuntimeKind.GUI_IDE,
+        display_name="WezTerm",
+        executables=("wezterm-gui", "wezterm"),
+        arg_needles=("wezterm.app",),
+        bundle_id="com.github.wez.wezterm",
+    ),
+    _RuntimePattern(
+        source=AgentRuntimeSource.KITTY,
+        kind=AgentRuntimeKind.GUI_IDE,
+        display_name="kitty",
+        executables=("kitty",),
+        arg_needles=("kitty.app",),
+        bundle_id="net.kovidgoyal.kitty",
+    ),
+    _RuntimePattern(
         source=AgentRuntimeSource.WARP,
         kind=AgentRuntimeKind.GUI_IDE,
         display_name="Warp",
@@ -682,7 +727,7 @@ class AgentRuntimeStore:
         return status.effective_session_id
 
 
-PsProvider = Callable[[], str]
+PsProvider = Callable[[], str | bytes]
 Clock = Callable[[], int]
 
 
@@ -691,11 +736,33 @@ def _default_clock() -> int:
 
 
 def _default_ps_provider() -> str:
-    return subprocess.check_output(  # noqa: S603
-        ["/bin/ps", "-axo", "pid=,ppid=,comm=,args="],
-        text=True,
+    output = subprocess.check_output(  # noqa: S603
+        ["/bin/ps", "-axo", "pid=,ppid=,tty=,comm=,args="],
         stderr=subprocess.DEVNULL,
     )
+    return decode_ps_output(output)
+
+
+def decode_ps_output(output: str | bytes) -> str:
+    """Decode ``ps`` output without letting one bad argv byte kill scanning."""
+    if isinstance(output, bytes):
+        return output.decode("utf-8", errors="replace")
+    return output
+
+
+def scan_runtime_statuses(
+    *,
+    ps_provider: PsProvider = _default_ps_provider,
+    clock: Clock = _default_clock,
+) -> list[AgentRuntimeStatus]:
+    """Run one read-only runtime discovery pass.
+
+    The resident scanner and CLI diagnostics share this seam so
+    ``deskmate runtime scan`` reports the same statuses the island will
+    receive on the next polling tick.
+    """
+    rows = parse_ps_output(decode_ps_output(ps_provider()))
+    return discover_runtime_statuses(rows, now_ms=clock())
 
 
 # ---------------------------------------------------------------------------
@@ -746,12 +813,14 @@ class AgentRuntimeScanner:
 
     async def scan_once(self) -> bool:
         try:
-            rows = parse_ps_output(self._ps_provider())
+            now_ms = self._clock()
+            statuses = scan_runtime_statuses(
+                ps_provider=self._ps_provider,
+                clock=lambda: now_ms,
+            )
         except Exception as exc:  # noqa: BLE001
             _LOG.warning("agent_runtime.ps_failed", error=str(exc))
             return False
-        now_ms = self._clock()
-        statuses = discover_runtime_statuses(rows, now_ms=now_ms)
         changed = self._store.upsert_many(statuses)
         expired = self._store.expire(now_ms)
         if statuses:
@@ -802,7 +871,23 @@ class AgentRuntimeScanner:
             "runtime_kind": status.kind.value,
             "command": status.command,
         }
+        for key in (
+            "terminal_app",
+            "terminal_tty",
+            "terminal_pid",
+            "terminal_source",
+            "tty",
+        ):
+            value = status.raw.get(key)
+            if value is not None and str(value).strip():
+                extras[key] = str(value)
         phase_source: str | None = existing.phase_source if existing else None
+        phase = _scanner_phase(existing, status)
+        priority = (
+            existing.priority
+            if existing is not None and phase is existing.phase
+            else status.priority
+        )
 
         if status.source == AgentRuntimeSource.CODEX:
             if existing is None:
@@ -829,10 +914,10 @@ class AgentRuntimeScanner:
                 title=title,
                 summary=_summary_for(status),
                 state=SessionState.ACTIVE,
-                priority=status.priority,
+                priority=priority,
                 created_at_ms=existing.created_at_ms if existing else status.last_seen_ms,
                 updated_at_ms=status.last_seen_ms,
-                phase=status.phase,
+                phase=phase,
                 phase_source=phase_source,
                 cwd=status.cwd,
                 source=status.source.value,
@@ -867,7 +952,7 @@ def parse_ps_output(text: str) -> list[ProcessRow]:
         line = raw.strip()
         if not line:
             continue
-        parts = line.split(maxsplit=3)
+        parts = line.split(maxsplit=4)
         if len(parts) < 3:
             continue
         try:
@@ -875,10 +960,24 @@ def parse_ps_output(text: str) -> list[ProcessRow]:
             ppid = int(parts[1])
         except ValueError:
             continue
-        comm = parts[2]
-        args = parts[3] if len(parts) > 3 else comm
-        rows.append(ProcessRow(pid=pid, ppid=ppid, comm=comm, args=args))
+        if len(parts) >= 5 and _looks_like_tty(parts[2]):
+            tty = parts[2]
+            comm = parts[3]
+            args = parts[4]
+        else:
+            # Backward-compatible parser for older tests/providers
+            # using ``pid ppid comm args`` with no tty column.
+            tty = ""
+            comm = parts[2]
+            args = " ".join(parts[3:]) if len(parts) > 3 else comm
+        rows.append(ProcessRow(pid=pid, ppid=ppid, comm=comm, args=args, tty=tty))
     return rows
+
+
+def _looks_like_tty(value: str) -> bool:
+    if value in {"?", "??", "console"}:
+        return True
+    return value.startswith(("tty", "ttys", "pts/"))
 
 
 def discover_runtime_statuses(
@@ -894,13 +993,19 @@ def discover_runtime_statuses(
     fork renderers.
     """
 
+    terminal_by_pid = _terminal_hosts_by_pid(rows)
     classified: list[tuple[ProcessRow, _RuntimePattern, AgentRuntimeStatus]] = []
     for row in rows:
         match = _classify(row)
         if match is None:
             continue
         pattern = match
-        status = _build_status(row, pattern, now_ms=now_ms)
+        status = _build_status(
+            row,
+            pattern,
+            now_ms=now_ms,
+            terminal_host=terminal_by_pid.get(row.ppid),
+        )
         classified.append((row, pattern, status))
 
     return _dedupe_renderers(classified)
@@ -950,7 +1055,11 @@ def _classify(row: ProcessRow) -> _RuntimePattern | None:
 
 
 def _build_status(
-    row: ProcessRow, pattern: _RuntimePattern, *, now_ms: int
+    row: ProcessRow,
+    pattern: _RuntimePattern,
+    *,
+    now_ms: int,
+    terminal_host: AgentRuntimeStatus | None = None,
 ) -> AgentRuntimeStatus:
     cwd_hint = (
         _extract_workspace_hint(row.args)
@@ -965,6 +1074,16 @@ def _build_status(
     # ``cwd`` and falls back to the original path when no marker is
     # found, so the call is safe regardless of GUI/CLI kind.
     workspace_hint = detect_workspace_root(cwd_hint)
+    raw: dict[str, Any] = {"comm": row.comm}
+    if row.tty:
+        raw["tty"] = row.tty
+    if terminal_host is not None and pattern.kind is AgentRuntimeKind.CLI_AGENT:
+        raw["terminal_app"] = terminal_host.display_name or terminal_host.source.value
+        if row.tty:
+            raw["terminal_tty"] = row.tty
+        raw["terminal_pid"] = terminal_host.process_id
+        raw["terminal_source"] = terminal_host.source.value
+
     return AgentRuntimeStatus(
         source=pattern.source,
         kind=pattern.kind,
@@ -978,8 +1097,28 @@ def _build_status(
         phase=SessionPhase.RUNNING,
         priority=_priority_for(pattern.kind),
         last_seen_ms=now_ms,
-        raw={"comm": row.comm},
+        raw=raw,
     )
+
+
+_TERMINAL_SOURCES = frozenset({
+    AgentRuntimeSource.TERMINAL,
+    AgentRuntimeSource.ITERM,
+    AgentRuntimeSource.GHOSTTY,
+    AgentRuntimeSource.WEZTERM,
+    AgentRuntimeSource.KITTY,
+    AgentRuntimeSource.WARP,
+})
+
+
+def _terminal_hosts_by_pid(rows: Sequence[ProcessRow]) -> dict[int, AgentRuntimeStatus]:
+    hosts: dict[int, AgentRuntimeStatus] = {}
+    for row in rows:
+        pattern = _classify(row)
+        if pattern is None or pattern.source not in _TERMINAL_SOURCES:
+            continue
+        hosts[row.pid] = _build_status(row, pattern, now_ms=0)
+    return hosts
 
 
 def _priority_for(kind: AgentRuntimeKind) -> Priority:
@@ -1075,6 +1214,29 @@ def _is_hook_session(session: SessionInfo) -> bool:
     return "hook_source" in extras
 
 
+def _scanner_phase(
+    existing: SessionInfo | None,
+    status: AgentRuntimeStatus,
+) -> SessionPhase:
+    """Preserve observed fine-grained phases across passive scans."""
+    if existing is None:
+        return status.phase
+    if status.phase is not SessionPhase.RUNNING:
+        return status.phase
+    if existing.phase in {
+        SessionPhase.WAITING_FOR_APPROVAL,
+        SessionPhase.WAITING_FOR_ANSWER,
+        SessionPhase.THINKING,
+        SessionPhase.EDITING,
+        SessionPhase.RUNNING_TOOL,
+        SessionPhase.TESTING,
+        SessionPhase.COMPLETED,
+        SessionPhase.FAILED,
+    }:
+        return existing.phase
+    return status.phase
+
+
 # ---------------------------------------------------------------------------
 # Default registry factory (V10 Requirement 4.8)
 # ---------------------------------------------------------------------------
@@ -1136,8 +1298,10 @@ __all__ = [
     "AgentRuntimeStatus",
     "AgentRuntimeStore",
     "ProcessRow",
+    "decode_ps_output",
     "detect_workspace_root",
     "discover_runtime_statuses",
     "make_default_registry",
     "parse_ps_output",
+    "scan_runtime_statuses",
 ]

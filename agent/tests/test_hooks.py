@@ -36,6 +36,9 @@ def test_codex_hook_normalizes_unknown_payload_and_preserves_raw() -> None:
         ({"event": "tool.start", "tool": "Edit"}, SessionPhase.EDITING),
         ({"event": "tool.start", "tool": "Bash", "command": "pytest"}, SessionPhase.TESTING),
         ({"event": "tool.start", "tool": "Bash"}, SessionPhase.RUNNING_TOOL),
+        ({"event": "tool.end", "tool": "Bash"}, SessionPhase.COMPLETED),
+        ({"hook_event_name": "PostToolUse", "tool_name": "Bash"}, SessionPhase.COMPLETED),
+        ({"event": "session.completed"}, SessionPhase.COMPLETED),
         ({"event": "tool.failed"}, SessionPhase.FAILED),
     ],
 )

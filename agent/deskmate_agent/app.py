@@ -48,6 +48,7 @@ from .character_packs import (
 )
 from .claude_transcripts import ClaudeTranscriptWatcher
 from .codex_app_server import CodexAppServerCoordinator
+from .codex_transcripts import CodexTranscriptWatcher
 from .context import PerceptionSnapshot, ProactiveContext
 from .decision import (
     EngineKind,
@@ -66,7 +67,17 @@ from .hooks import (
 from .intent_logger import IntentLogger
 from .island_notifications import IslandNotificationPublisher
 from .logging_setup import get_logger, trace_scope
-from .memory import CodingSessionStore, ProfileStore, SessionMemory
+from .memory import (
+    ChatMemory,
+    CodingSessionStore,
+    DeskmateTaskStore,
+    ProfileStore,
+    SessionMemory,
+    ToolActionLog,
+    ToolActionRecord,
+    resolve_memory_suggestion,
+    resolve_task_suggestion,
+)
 from .module_registrations import (
     ModuleRegistrationWatcher,
     default_module_registrations_dir,
@@ -83,23 +94,29 @@ from .protocol.intents import (
     IslandModuleSpec,
     register_module_intent,
 )
-from .protocol.state import BubbleKind, BubbleSpec, Priority, UserFocus
+from .protocol.state import AgentMood, BubbleKind, BubbleSpec, Priority, UserFocus
 from .reminders import Reminder, ReminderScheduler, ReminderStore
 from .sessions import (
     SessionInfo,
     SessionInteractionRouter,
     SessionPhase,
+    SessionState,
     SessionStore,
 )
 from .skills import (
     BuildStatusSkill,
     BuildStatusWatcher,
     CodingSessionTracker,
+    PendingComputerActionStore,
     SkillRegistry,
+    TaskCommand,
     make_default_composer,
     make_default_streaming_composer,
     populate_default_registry,
+    resolve_pending_computer_action,
+    run_task_command,
 )
+from .task_nudges import TaskNudgeWatcher
 
 _LOG = get_logger("deskmate_agent.app")
 
@@ -129,6 +146,26 @@ def _phase_for_agent_event(event: AgentEvent) -> SessionPhase:
     if isinstance(event, (SessionActivityUpdated, SessionStarted)):
         return event.phase
     return SessionPhase.RUNNING
+
+
+_STALE_HOOK_PHASES = {
+    SessionPhase.THINKING,
+    SessionPhase.EDITING,
+    SessionPhase.RUNNING_TOOL,
+    SessionPhase.TESTING,
+    SessionPhase.RUNNING,
+}
+
+
+def _is_reapable_hook_session(session: SessionInfo) -> bool:
+    if session.state is not SessionState.ACTIVE:
+        return False
+    if session.phase not in _STALE_HOOK_PHASES:
+        return False
+    if session.kind == "hook_session":
+        return True
+    extras = session.extras or {}
+    return bool(extras.get("hook_source") or extras.get("hook_event"))
 
 
 def _default_bundled_packs_dir() -> Path:
@@ -182,6 +219,26 @@ class AppConfig:
     #: this explicitly; tests and embedded AppConfig instances stay off unless
     #: requested.
     codex_app_server_enabled: bool = False
+    #: Read-only discovery of local Codex rollout JSONL files. Production
+    #: enables this from ``main.py``; tests keep it off unless explicitly
+    #: requested so host ``~/.codex`` state cannot leak into fixtures.
+    codex_transcript_watcher_enabled: bool = False
+    #: Safety net for hook sources that emit activity starts but miss the
+    #: corresponding stop/completed event. Actionable states are excluded.
+    stale_hook_session_reaper_enabled: bool = True
+    stale_hook_session_ttl_s: float = 45.0
+    stale_hook_session_poll_s: float = 5.0
+    #: Recoverability guard for persisted LLM tool-call tasks. Any task still
+    #: marked running from a previous process and older than this threshold is
+    #: finalized as failed during setup, without replaying any action.
+    stale_tool_task_ttl_s: float = 300.0
+    #: Low-priority nudges for durable user-visible tasks that have not changed
+    #: for a while. This is separate from perception-based proactive nudges:
+    #: task freshness is owned by ``tasks.db``.
+    task_nudge_enabled: bool = True
+    task_nudge_stale_after_s: float = 4 * 60 * 60
+    task_nudge_cooldown_s: float = 6 * 60 * 60
+    task_nudge_poll_s: float = 5 * 60
 
 
 LLMPrewarmFn = Callable[[], Awaitable[None]]
@@ -197,6 +254,9 @@ class AppRuntime:
     """Exposes the live sub-components for tests / diagnostics."""
 
     session_memory: SessionMemory
+    chat_memory: ChatMemory
+    task_store: DeskmateTaskStore
+    tool_action_log: ToolActionLog
     coding_session_store: CodingSessionStore
     session_store: SessionStore
     session_router: SessionInteractionRouter
@@ -205,6 +265,7 @@ class AppRuntime:
     approval_store: ApprovalStore
     approval_router: ApprovalRouter
     approval_surface: ApprovalSurfacePublisher
+    pending_computer_actions: PendingComputerActionStore
     domain_projector: DomainStateProjector
     profile: ProfileStore
     bridge: BridgeServer
@@ -215,6 +276,7 @@ class AppRuntime:
     agent_runtime_store: AgentRuntimeStore
     agent_runtime_scanner: AgentRuntimeScanner
     codex_app_server: CodexAppServerCoordinator
+    codex_transcript_watcher: CodexTranscriptWatcher
     claude_transcript_watcher: ClaudeTranscriptWatcher
     hook_event_watcher: HookEventWatcher
     module_registration_watcher: ModuleRegistrationWatcher
@@ -223,6 +285,7 @@ class AppRuntime:
     skill_registry: SkillRegistry
     character_pack_registry: CharacterPackRegistry
     island_notifications: IslandNotificationPublisher
+    task_nudge_watcher: TaskNudgeWatcher
     prewarm_started: asyncio.Event = field(default_factory=asyncio.Event)
     agent_ready_sent: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -253,6 +316,16 @@ class App:
 
         session_mem = SessionMemory(cfg.db_dir / "sessions.db")
         await session_mem.open()
+
+        chat_memory = ChatMemory(cfg.db_dir / "chat.db")
+        await chat_memory.open()
+
+        task_store = DeskmateTaskStore(cfg.db_dir / "tasks.db")
+        await task_store.open()
+
+        tool_action_log = ToolActionLog(cfg.db_dir / "tool_actions.db")
+        await tool_action_log.open()
+        await self._finalize_stale_tool_tasks(tool_action_log)
 
         # Phase 15-i: the coding-session log lives in the same SQLite
         # file as session summaries so users only have one place to
@@ -424,6 +497,15 @@ class App:
         # fragments. Built once at setup so Phase 12-ii's composer
         # picks it up.
         skill_registry = populate_default_registry(SkillRegistry())
+        approval_store = ApprovalStore()
+        pending_computer_actions = PendingComputerActionStore()
+        reminder_store = ReminderStore()
+        reminder_scheduler = ReminderScheduler(reminder_store, intent_sink)
+        tool_event_handler: Callable[[AgentEvent], Awaitable[None]] | None = None
+
+        async def _handle_deskmate_tool_event(event: AgentEvent) -> None:
+            if tool_event_handler is not None:
+                await tool_event_handler(event)
         # V10 Phase 9 · §4 step 3: a deduper that coalesces
         # near-duplicate perception ticks. The widening factor reads
         # straight from the degradation controller so once the system
@@ -441,14 +523,30 @@ class App:
             # intent sink / bridge / Swift UI are all unchanged across
             # both modes — the skill seam is a single async callable.
             reply_composer=make_default_composer(
-                skill_registry=skill_registry
+                skill_registry=skill_registry,
+                approval_store=approval_store,
+                pending_computer_actions=pending_computer_actions,
+                reminder_store=reminder_store,
+                chat_memory=chat_memory,
+                task_store=task_store,
+                tool_action_log=tool_action_log,
+                profile_store=profile,
+                tool_event_sink=_handle_deskmate_tool_event,
             ),
             # V10 L3-B1: when the LLM key is configured (and
             # ``DESKMATE_LLM_STREAMING`` is not opt-out'd), the
             # streaming composer wins inside ``Dispatcher`` and
             # tokens land via ``UPDATE_PET_BUBBLE`` intents.
             streaming_reply_composer=make_default_streaming_composer(
-                skill_registry=skill_registry
+                skill_registry=skill_registry,
+                approval_store=approval_store,
+                pending_computer_actions=pending_computer_actions,
+                reminder_store=reminder_store,
+                chat_memory=chat_memory,
+                task_store=task_store,
+                tool_action_log=tool_action_log,
+                profile_store=profile,
+                tool_event_sink=_handle_deskmate_tool_event,
             ),
             # Phase 13-i: observe perception ticks so the island
             # reflects what the user is actually doing (coding in
@@ -470,10 +568,6 @@ class App:
             intent_sink=intent_sink,
         )
 
-        reminder_store = ReminderStore()
-        reminder_scheduler = ReminderScheduler(reminder_store, intent_sink)
-
-        approval_store = ApprovalStore()
         approval_surface = ApprovalSurfacePublisher(approval_store, intent_sink)
 
         domain_projector = DomainStateProjector(
@@ -481,6 +575,51 @@ class App:
             session_store=session_store,
             intent_sink=intent_sink,
         )
+
+        async def _handle_approval_resolved(approval: Approval) -> None:
+            message = await resolve_pending_computer_action(
+                approval,
+                pending_actions=pending_computer_actions,
+            )
+            if message is None:
+                message = await resolve_memory_suggestion(
+                    approval,
+                    profile_store=profile,
+                )
+                if message is not None:
+                    await _record_memory_suggestion_resolution(
+                        approval,
+                        message=message,
+                        tool_action_log=tool_action_log,
+                    )
+            if message is None:
+                message = await resolve_task_suggestion(
+                    approval,
+                    task_store=task_store,
+                )
+                if message is not None:
+                    await _record_task_suggestion_resolution(
+                        approval,
+                        message=message,
+                        tool_action_log=tool_action_log,
+                    )
+            if message is None:
+                return
+            await intent_sink(
+                CompanionIntent(
+                    kind=IntentKind.SHOW_PET_BUBBLE,
+                    payload={
+                        "bubble": BubbleSpec(
+                            id=f"computer-control-{approval.approval_id}",
+                            kind=BubbleKind.STATUS,
+                            text=message,
+                            ttl_ms=3_000,
+                            priority=Priority.P2,
+                        ).model_dump(mode="json")
+                    },
+                )
+            )
+
         # island-polish-enhancements R1: ApprovalRouter now owns the
         # close-loop emission (dismiss_island + session phase write +
         # projector kick), so it needs the bridge sink, the live
@@ -490,6 +629,7 @@ class App:
             intent_sink=intent_sink,
             session_store=session_store,
             domain_projector=domain_projector,
+            on_resolved=_handle_approval_resolved,
         )
         # Phase 9 · §4: any controller-level change shows up in the
         # next ``UPDATE_DOMAIN_STATE`` intent so Swift can apply its
@@ -582,6 +722,15 @@ class App:
                 )
 
         session_store.subscribe(_unsilence_on_session_activity)
+
+        task_nudge_watcher = TaskNudgeWatcher(
+            task_store,
+            intent_sink,
+            island_notifications=island_notifications,
+            stale_after_ms=int(cfg.task_nudge_stale_after_s * 1000),
+            cooldown_ms=int(cfg.task_nudge_cooldown_s * 1000),
+            poll_s=cfg.task_nudge_poll_s,
+        )
 
         hook_consumer = HookEventConsumer(
             session_store=session_store,
@@ -677,8 +826,17 @@ class App:
                 pass
             await self._send_snapshot_best_effort()
 
+        tool_event_handler = _handle_codex_agent_event
+
+        async def _handle_codex_transcript_event(event) -> None:
+            agent_event_reducer.apply(event)
+            await self._send_snapshot_best_effort()
+
         codex_app_server = CodexAppServerCoordinator(
             event_handler=_handle_codex_agent_event
+        )
+        codex_transcript_watcher = CodexTranscriptWatcher(
+            handler=_handle_codex_transcript_event
         )
         claude_transcript_watcher = ClaudeTranscriptWatcher(
             handler=_handle_codex_agent_event
@@ -686,6 +844,9 @@ class App:
 
         self._runtime = AppRuntime(
             session_memory=session_mem,
+            chat_memory=chat_memory,
+            task_store=task_store,
+            tool_action_log=tool_action_log,
             coding_session_store=coding_session_store,
             session_store=session_store,
             session_router=session_router,
@@ -694,6 +855,7 @@ class App:
             approval_store=approval_store,
             approval_router=approval_router,
             approval_surface=approval_surface,
+            pending_computer_actions=pending_computer_actions,
             domain_projector=domain_projector,
             profile=profile,
             bridge=bridge,
@@ -704,6 +866,7 @@ class App:
             agent_runtime_store=agent_runtime_store,
             agent_runtime_scanner=agent_runtime_scanner,
             codex_app_server=codex_app_server,
+            codex_transcript_watcher=codex_transcript_watcher,
             claude_transcript_watcher=claude_transcript_watcher,
             hook_event_watcher=hook_event_watcher,
             module_registration_watcher=module_registration_watcher,
@@ -712,6 +875,7 @@ class App:
             skill_registry=skill_registry,
             character_pack_registry=character_pack_registry,
             island_notifications=island_notifications,
+            task_nudge_watcher=task_nudge_watcher,
         )
         return self._runtime
 
@@ -719,6 +883,13 @@ class App:
         rt = self._require()
         if self.config.prewarm_enabled:
             self._bg_tasks.append(asyncio.create_task(self._run_prewarm()))
+        if self.config.stale_hook_session_reaper_enabled:
+            self._bg_tasks.append(
+                asyncio.create_task(
+                    self._run_stale_hook_session_reaper(),
+                    name="stale-hook-session-reaper",
+                )
+            )
         rt.domain_projector.start()
         rt.approval_surface.start()
         await rt.reminder_scheduler.start()
@@ -726,10 +897,14 @@ class App:
         # for build/test status updates emitted by the ``deskmate``
         # CLI. Cheap, self-terminates on teardown.
         await rt.build_status_watcher.start()
+        if self.config.task_nudge_enabled:
+            await rt.task_nudge_watcher.start()
         if self.config.agent_runtime_scanner_enabled:
             await rt.agent_runtime_scanner.start()
         if self.config.codex_app_server_enabled:
             await rt.codex_app_server.start()
+        if self.config.codex_transcript_watcher_enabled:
+            await rt.codex_transcript_watcher.start()
         await rt.claude_transcript_watcher.start()
         await rt.hook_event_watcher.start()
         await rt.module_registration_watcher.start()
@@ -746,6 +921,10 @@ class App:
         rt = self._runtime
         if rt is None:
             return
+        try:
+            await rt.task_nudge_watcher.stop()
+        except Exception as exc:  # noqa: BLE001
+            _LOG.warning("app.task_nudge_watcher_stop_failed", error=str(exc))
         try:
             await rt.build_status_watcher.stop()
         except Exception as exc:  # noqa: BLE001
@@ -766,6 +945,10 @@ class App:
             await rt.codex_app_server.stop()
         except Exception as exc:  # noqa: BLE001
             _LOG.warning("app.codex_app_server_stop_failed", error=str(exc))
+        try:
+            await rt.codex_transcript_watcher.stop()
+        except Exception as exc:  # noqa: BLE001
+            _LOG.warning("app.codex_transcript_watcher_stop_failed", error=str(exc))
         try:
             await rt.claude_transcript_watcher.stop()
         except Exception as exc:  # noqa: BLE001
@@ -790,6 +973,18 @@ class App:
             await rt.session_memory.close()
         except Exception as exc:  # noqa: BLE001
             _LOG.warning("app.session_close_failed", error=str(exc))
+        try:
+            await rt.chat_memory.close()
+        except Exception as exc:  # noqa: BLE001
+            _LOG.warning("app.chat_memory_close_failed", error=str(exc))
+        try:
+            await rt.task_store.close()
+        except Exception as exc:  # noqa: BLE001
+            _LOG.warning("app.task_store_close_failed", error=str(exc))
+        try:
+            await rt.tool_action_log.close()
+        except Exception as exc:  # noqa: BLE001
+            _LOG.warning("app.tool_action_log_close_failed", error=str(exc))
         try:
             await rt.coding_session_store.close()
         except Exception as exc:  # noqa: BLE001
@@ -826,8 +1021,12 @@ class App:
         rt = self._require()
         with trace_scope(env.trace_id):
             if env.type is EnvelopeType.USER_MESSAGE:
+                active_tasks_before = await _build_active_task_snapshot(rt.task_store)
                 await rt.dispatcher.on_user_message(
                     env.payload.get("text", ""), trace_id=env.trace_id
+                )
+                await self._send_snapshot_if_active_tasks_changed(
+                    active_tasks_before
                 )
             elif env.type is EnvelopeType.USER_CLICK_PET:
                 await rt.dispatcher.on_user_click_pet()
@@ -840,6 +1039,8 @@ class App:
                     _context_from_perception(
                         env.payload,
                         coding_today_ms=snapshot.coding_today_ms,
+                        current_priority=snapshot.current_priority,
+                        current_mood=snapshot.agent_mood,
                     )
                 )
             elif env.type is EnvelopeType.INTERACTION:
@@ -867,6 +1068,65 @@ class App:
             await self._llm_prewarm()
         except Exception as exc:  # noqa: BLE001 — prewarm failure is never fatal
             _LOG.warning("app.prewarm_failed", error=str(exc))
+
+    async def _run_stale_hook_session_reaper(self) -> None:
+        while True:
+            await asyncio.sleep(max(self.config.stale_hook_session_poll_s, 0.1))
+            try:
+                await self._reap_stale_hook_sessions()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                _LOG.warning("app.stale_hook_session_reaper_failed", error=str(exc))
+
+    async def _reap_stale_hook_sessions(self) -> int:
+        rt = self._require()
+        now_ms = int(time.time() * 1000)
+        cutoff_ms = now_ms - int(max(self.config.stale_hook_session_ttl_s, 0.1) * 1000)
+        count = 0
+        for session in rt.session_store.list():
+            if not _is_reapable_hook_session(session):
+                continue
+            if session.updated_at_ms > cutoff_ms:
+                continue
+            rt.session_store.upsert(
+                session.model_copy(
+                    update={
+                        "state": SessionState.CLOSED,
+                        "phase": SessionPhase.COMPLETED,
+                        "priority": Priority.P2,
+                        "updated_at_ms": now_ms,
+                        "closed_at_ms": session.closed_at_ms or now_ms,
+                        "summary": session.summary or "No recent hook activity.",
+                    }
+                )
+            )
+            count += 1
+        if count:
+            await self._send_snapshot_best_effort()
+        return count
+
+    async def _finalize_stale_tool_tasks(
+        self,
+        tool_action_log: ToolActionLog,
+    ) -> int:
+        now_ms = int(time.time() * 1000)
+        cutoff_ms = now_ms - int(max(self.config.stale_tool_task_ttl_s, 0.1) * 1000)
+        try:
+            count = await tool_action_log.mark_stale_running_tasks_failed(
+                cutoff_updated_at_ms=cutoff_ms,
+                completed_at_ms=now_ms,
+            )
+        except Exception as exc:  # noqa: BLE001 — startup must not fail on audit cleanup
+            _LOG.warning(
+                "app.stale_tool_task_finalize_failed",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            return 0
+        if count:
+            _LOG.info("app.stale_tool_tasks_finalized", count=count)
+        return count
 
     async def _handle_module_registration(self, spec: IslandModuleSpec) -> None:
         """Store and forward an external island module registration.
@@ -955,7 +1215,11 @@ class App:
         # Dispatch on kind so each router owns its verbs regardless of
         # which surface originated the action (V10 L1-F).
         if action.kind is InteractionKind.PERMISSION_RESOLVE:
+            active_tasks_before = await _build_active_task_snapshot(rt.task_store)
             await rt.approval_router.handle(action)
+            await self._send_snapshot_if_active_tasks_changed(
+                active_tasks_before
+            )
         elif action.kind in {
             InteractionKind.SESSION_JUMP,
             InteractionKind.QUESTION_ANSWER,
@@ -967,6 +1231,19 @@ class App:
                 await self._handle_question_answer_result(result)
         elif action.kind is InteractionKind.DEMO_TRIGGER:
             await self._handle_demo_trigger(action)
+        elif action.kind is InteractionKind.TASK_OPEN_DETAIL:
+            await self._handle_task_open_detail(action)
+        elif action.kind in {
+            InteractionKind.TASK_START,
+            InteractionKind.TASK_PAUSE,
+            InteractionKind.TASK_ADVANCE,
+            InteractionKind.TASK_COMPLETE,
+        }:
+            active_tasks_before = await _build_active_task_snapshot(rt.task_store)
+            await self._handle_task_control_action(action)
+            await self._send_snapshot_if_active_tasks_changed(
+                active_tasks_before
+            )
         elif action.kind is InteractionKind.SURFACE_DISMISS:
             _LOG.debug(
                 "app.surface_dismiss",
@@ -993,9 +1270,9 @@ class App:
         else:
             # V10 L1-F catch-all: every typed kind must surface as a
             # structured log line, never get silently dropped.
-            # ``TASK_OPEN_DETAIL / PET_INTERACT / PET_DRAG / PET_NEST``
-            # currently land here as no-ops; future skills that bind to
-            # them should add their own ``elif`` branch above.
+            # ``PET_INTERACT / PET_DRAG / PET_NEST`` currently land
+            # here as no-ops; future skills that bind to them should
+            # add their own ``elif`` branch above.
             _LOG.info(
                 "app.interaction_unhandled",
                 kind=action.kind.value,
@@ -1003,6 +1280,107 @@ class App:
                 target=action.target.value,
                 payload_keys=sorted(action.payload.keys()),
             )
+
+    async def _handle_task_open_detail(self, action: InteractionAction) -> None:
+        rt = self._require()
+        task_id = str(action.payload.get("task_id") or "").strip()
+        if not task_id:
+            return
+        try:
+            task = await rt.task_store.get(task_id)
+        except Exception as exc:  # noqa: BLE001
+            _LOG.warning(
+                "app.task_open_detail_failed",
+                task_id=task_id,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            task = None
+        if task is None:
+            await self._send_task_detail_bubble(
+                task_id=task_id,
+                text="That task is no longer active.",
+            )
+            return
+        try:
+            steps = await rt.task_store.list_steps(task.task_id)
+        except Exception as exc:  # noqa: BLE001
+            _LOG.warning(
+                "app.task_open_detail_steps_failed",
+                task_id=task.task_id,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            steps = []
+        text = _format_task_detail_text(task, steps)
+        await self._send_task_detail_bubble(task_id=task.task_id, text=text)
+        with contextlib.suppress(RuntimeError):
+            await rt.island_notifications.show_notification(
+                activity_id=f"task-detail-{task.task_id}",
+                priority=Priority.P2,
+                detail=_format_task_detail_island_line(task, steps),
+            )
+
+    async def _handle_task_control_action(self, action: InteractionAction) -> None:
+        rt = self._require()
+        task_id = str(action.payload.get("task_id") or "").strip()
+        if not task_id:
+            return
+        try:
+            task = await rt.task_store.get(task_id)
+        except Exception as exc:  # noqa: BLE001
+            _LOG.warning(
+                "app.task_control_failed",
+                task_id=task_id,
+                kind=action.kind.value,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            task = None
+        if task is None or task.status not in {"open", "in_progress"}:
+            await self._send_task_detail_bubble(
+                task_id=task_id,
+                text="That task is no longer active.",
+            )
+            return
+
+        command = _task_command_for_interaction(action.kind, task_id)
+        if command is None:
+            return
+        message = await run_task_command(
+            command,
+            task_store=rt.task_store,
+            tool_action_log=rt.tool_action_log,
+            conversation_id=task.conversation_id,
+        )
+        await self._send_task_detail_bubble(task_id=task_id, text=message)
+        with contextlib.suppress(RuntimeError):
+            await rt.island_notifications.show_notification(
+                activity_id=f"task-action-{task_id}-{action.kind.value}",
+                priority=Priority.P2,
+                detail=_task_control_island_line(action.kind, task.title),
+            )
+
+    async def _send_task_detail_bubble(self, *, task_id: str, text: str) -> None:
+        await self._send_bridge_envelope_best_effort(
+            BridgeEnvelope.of(
+                EnvelopeType.INTENT,
+                {
+                    "kind": IntentKind.SHOW_PET_BUBBLE.value,
+                    "payload": {
+                        "task_id": task_id,
+                        "bubble": BubbleSpec(
+                            id=f"task-detail-{task_id}",
+                            kind=BubbleKind.STATUS,
+                            text=text,
+                            ttl_ms=8_000,
+                            priority=Priority.P2,
+                            source_event_id=f"task:{task_id}",
+                        ).model_dump(mode="json"),
+                    },
+                },
+            )
+        )
 
     async def _handle_session_jump_result(self, result) -> None:
         if result.effect in {
@@ -1207,6 +1585,16 @@ class App:
         except Exception as exc:  # noqa: BLE001
             _LOG.warning("app.snapshot_push_failed", error=str(exc))
 
+    async def _send_snapshot_if_active_tasks_changed(
+        self,
+        before: list[dict[str, Any]],
+    ) -> None:
+        rt = self._require()
+        after = await _build_active_task_snapshot(rt.task_store)
+        if after == before:
+            return
+        await self._send_snapshot_best_effort()
+
     async def _build_snapshot(self) -> dict[str, Any]:
         rt = self._require()
         cutoff_ms = int(time.time() * 1000) - (
@@ -1222,6 +1610,7 @@ class App:
         pending_approvals_detail = [
             a.model_dump(mode="json") for a in rt.approval_store.list_pending()
         ]
+        active_tasks = await _build_active_task_snapshot(rt.task_store)
         domain_state = rt.domain_projector.current_state()
         return {
             "domain_state": domain_state.model_dump(mode="json"),
@@ -1238,6 +1627,7 @@ class App:
             "active_sessions": active_sessions,
             "pending_reminders": pending_reminders,
             "pending_approvals_detail": pending_approvals_detail,
+            "active_tasks": active_tasks,
         }
 
     def _require(self) -> AppRuntime:
@@ -1251,10 +1641,259 @@ class App:
 # ---------------------------------------------------------------------------
 
 
+def _task_command_for_interaction(
+    kind: InteractionKind,
+    task_id: str,
+) -> TaskCommand | None:
+    if kind is InteractionKind.TASK_START:
+        return TaskCommand("start", query=task_id)
+    if kind is InteractionKind.TASK_PAUSE:
+        return TaskCommand("pause", query=task_id)
+    if kind is InteractionKind.TASK_ADVANCE:
+        return TaskCommand("advance", query=task_id)
+    if kind is InteractionKind.TASK_COMPLETE:
+        return TaskCommand("update", task_id=task_id, status="done")
+    return None
+
+
+def _task_control_island_line(kind: InteractionKind, title: str) -> str:
+    label = {
+        InteractionKind.TASK_START: "Started",
+        InteractionKind.TASK_PAUSE: "Paused",
+        InteractionKind.TASK_ADVANCE: "Advanced",
+        InteractionKind.TASK_COMPLETE: "Completed",
+    }.get(kind, "Updated")
+    short_title = str(title or "Task").strip()
+    if len(short_title) > 44:
+        short_title = short_title[:41].rstrip() + "..."
+    return f"{label}: {short_title}"
+
+
+async def _record_memory_suggestion_resolution(
+    approval: Approval,
+    *,
+    message: str,
+    tool_action_log: ToolActionLog,
+) -> None:
+    """Audit approval-gated memory writes so later LLM turns can recall them."""
+    extras = approval.extras if isinstance(approval.extras, dict) else {}
+    now_ms = int(time.time() * 1000)
+    try:
+        await tool_action_log.append(
+            ToolActionRecord(
+                conversation_id="default",
+                tool_call_id=f"approval:{approval.approval_id}",
+                tool_name="deskmate_resolve_memory_suggestion",
+                arguments={
+                    "approval_id": approval.approval_id,
+                    "decision": approval.decision.value if approval.decision else "",
+                    "memory_key": extras.get("memory_key"),
+                    "memory_value": extras.get("memory_value"),
+                    "memory_operation": extras.get("memory_operation"),
+                    "memory_old_value": extras.get("memory_old_value"),
+                    "memory_source": extras.get("memory_source"),
+                },
+                result=message,
+                status=(
+                    "failed"
+                    if message.startswith("Memory suggestion was incomplete")
+                    else "completed"
+                ),
+                started_at_ms=approval.resolved_at_ms or now_ms,
+                completed_at_ms=now_ms,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 — audit must not break approvals
+        _LOG.warning(
+            "app.memory_suggestion_audit_failed",
+            approval_id=approval.approval_id,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+
+
+async def _record_task_suggestion_resolution(
+    approval: Approval,
+    *,
+    message: str,
+    tool_action_log: ToolActionLog,
+) -> None:
+    """Audit approval-gated task writes so later LLM turns can recall them."""
+    extras = approval.extras if isinstance(approval.extras, dict) else {}
+    now_ms = int(time.time() * 1000)
+    try:
+        await tool_action_log.append(
+            ToolActionRecord(
+                conversation_id=str(extras.get("conversation_id") or "default"),
+                tool_call_id=f"approval:{approval.approval_id}",
+                tool_name="deskmate_resolve_task_suggestion",
+                arguments={
+                    "approval_id": approval.approval_id,
+                    "decision": approval.decision.value if approval.decision else "",
+                    "task_title": extras.get("task_title"),
+                    "task_notes": extras.get("task_notes"),
+                    "task_status": extras.get("task_status"),
+                    "task_source": extras.get("task_source"),
+                    "conversation_id": extras.get("conversation_id"),
+                },
+                result=message,
+                status=(
+                    "failed"
+                    if message.startswith("Task suggestion was incomplete")
+                    else "completed"
+                ),
+                started_at_ms=approval.resolved_at_ms or now_ms,
+                completed_at_ms=now_ms,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 — audit must not break approvals
+        _LOG.warning(
+            "app.task_suggestion_audit_failed",
+            approval_id=approval.approval_id,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+
+
+async def _build_active_task_snapshot(
+    task_store: DeskmateTaskStore,
+    *,
+    conversation_id: str = "default",
+    limit: int = 5,
+    step_limit: int = 4,
+) -> list[dict[str, Any]]:
+    """Project durable user tasks into reconnect snapshots.
+
+    The island/menu surfaces can render a compact task lane from this
+    structured payload without parsing chat bubbles or querying SQLite.
+    Snapshot generation is fail-soft so task storage issues never break
+    reconnect or ``state.snapshot.request``.
+    """
+    try:
+        tasks = await task_store.list(
+            conversation_id,
+            status="active",
+            limit=limit,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning(
+            "app.active_task_snapshot_failed",
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        return []
+    out: list[dict[str, Any]] = []
+    for task in tasks:
+        steps: list[Any] = []
+        try:
+            steps = await task_store.list_steps(
+                task.task_id,
+                conversation_id=conversation_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _LOG.warning(
+                "app.active_task_steps_snapshot_failed",
+                task_id=task.task_id,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+        out.append(_task_snapshot_row(task, steps=steps, step_limit=step_limit))
+    return out
+
+
+def _task_snapshot_row(
+    task: Any,
+    *,
+    steps: list[Any],
+    step_limit: int,
+) -> dict[str, Any]:
+    step_rows = [_task_step_snapshot_row(step) for step in steps[:step_limit]]
+    current_step = _task_current_step(steps)
+    completed_step_count = sum(1 for step in steps if step.status == "completed")
+    row: dict[str, Any] = {
+        "task_id": task.task_id,
+        "conversation_id": task.conversation_id,
+        "title": task.title,
+        "status": task.status,
+        "notes": task.notes,
+        "created_at_ms": task.created_at_ms,
+        "updated_at_ms": task.updated_at_ms,
+        "completed_at_ms": task.completed_at_ms,
+        "completed_step_count": completed_step_count,
+        "total_step_count": len(steps),
+        "steps": step_rows,
+    }
+    if current_step is not None:
+        row["current_step"] = _task_step_snapshot_row(current_step)
+    return row
+
+
+def _task_step_snapshot_row(step: Any) -> dict[str, Any]:
+    return {
+        "step_id": step.step_id,
+        "task_id": step.task_id,
+        "conversation_id": step.conversation_id,
+        "position": step.position,
+        "content": step.content,
+        "status": step.status,
+        "active_form": step.active_form,
+        "created_at_ms": step.created_at_ms,
+        "updated_at_ms": step.updated_at_ms,
+        "completed_at_ms": step.completed_at_ms,
+    }
+
+
+def _task_current_step(steps: list[Any]) -> Any | None:
+    for step in steps:
+        if step.status == "in_progress":
+            return step
+    for step in steps:
+        if step.status == "pending":
+            return step
+    return None
+
+
+def _format_task_detail_text(task: Any, steps: list[Any]) -> str:
+    lines = [f"Task: {task.title}", f"Status: {task.status}"]
+    current_step = _task_current_step(steps)
+    if current_step is not None:
+        step_text = _task_step_display_text(current_step)
+        if step_text:
+            lines.append(f"Current step: {step_text}")
+    if task.notes:
+        lines.append(f"Notes: {task.notes}")
+    if steps:
+        lines.append("Checklist:")
+        for step in steps[:4]:
+            lines.append(
+                f"- {step.position}. [{step.status}] {_task_step_display_text(step)}"
+            )
+    return "\n".join(lines)
+
+
+def _format_task_detail_island_line(task: Any, steps: list[Any]) -> str:
+    title = str(task.title or task.task_id)
+    current_step = _task_current_step(steps)
+    if current_step is None:
+        return f"{title} · {task.status}"
+    step_text = _task_step_display_text(current_step)
+    if not step_text:
+        return f"{title} · {task.status}"
+    return f"{title} · {step_text}"
+
+
+def _task_step_display_text(step: Any) -> str:
+    if step.status == "in_progress" and step.active_form:
+        return str(step.active_form)
+    return str(step.content)
+
+
 def _context_from_perception(
     payload: dict[str, Any],
     *,
     coding_today_ms: int = 0,
+    current_priority: Priority = Priority.P2,
+    current_mood: AgentMood = AgentMood.IDLE,
 ) -> ProactiveContext:
     """Build a :class:`ProactiveContext` from a raw ``perception`` payload."""
     focus_raw = payload.get("focus", "casual")
@@ -1272,6 +1911,8 @@ def _context_from_perception(
     return ProactiveContext(
         perception=snap,
         coding_today_ms=max(0, int(coding_today_ms)),
+        current_priority=current_priority,
+        current_mood=current_mood,
     )
 
 

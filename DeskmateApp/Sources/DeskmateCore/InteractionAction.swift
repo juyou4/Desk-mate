@@ -27,6 +27,10 @@ public enum InteractionKind: String, Codable, Sendable, CaseIterable {
     case questionAnswer = "question.answer"
     case sessionJump = "session.jump"
     case taskOpenDetail = "task.open_detail"
+    case taskStart = "task.start"
+    case taskPause = "task.pause"
+    case taskAdvance = "task.advance"
+    case taskComplete = "task.complete"
 
     // Surface lifecycle
     case surfaceDismiss = "surface.dismiss"

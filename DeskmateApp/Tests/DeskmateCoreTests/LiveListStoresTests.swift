@@ -72,18 +72,29 @@ final class LiveListStoresTests: XCTestCase {
         XCTAssertEqual(last, [row])
     }
 
+    func testLiveActiveTasksStoreApplyAndSubscribe() {
+        let store = LiveActiveTasksStore()
+        var last: [TaskRow] = []
+        _ = store.subscribe { last = $0 }
+        let row = TaskRow(taskId: "task-1", title: "Polish task lane")
+        store.apply([row])
+        XCTAssertEqual(last, [row])
+    }
+
     // MARK: - Hydrator integration
 
-    func testHydratorPopulatesAllThreeListStores() {
+    func testHydratorPopulatesAllFourListStores() {
         let domain = LiveDomainStateStore()
         let sessions = LiveSessionListStore()
         let reminders = LivePendingRemindersStore()
         let approvals = LivePendingApprovalsStore()
+        let tasks = LiveActiveTasksStore()
         let h = SnapshotHydrator(
             domainStore: domain,
             sessionStore: sessions,
             reminderStore: reminders,
             approvalStore: approvals,
+            taskStore: tasks,
             callbackQueue: .main
         )
         let env = BridgeEnvelope.of(
@@ -115,6 +126,19 @@ final class LiveListStoresTests: XCTestCase {
                         "status": .string("pending"),
                     ])
                 ]),
+                "active_tasks": .array([
+                    .object([
+                        "task_id": .string("task-1"),
+                        "title": .string("Polish task lane"),
+                        "status": .string("in_progress"),
+                        "current_step": .object([
+                            "step_id": .string("step-1"),
+                            "content": .string("Expose task snapshot"),
+                            "status": .string("in_progress"),
+                            "active_form": .string("Exposing task snapshot"),
+                        ]),
+                    ])
+                ]),
             ]
         )
         h.handle(env)
@@ -122,6 +146,8 @@ final class LiveListStoresTests: XCTestCase {
         XCTAssertEqual(sessions.current.first?.title, "Design review")
         XCTAssertEqual(reminders.current.map(\.reminderId), ["r-1"])
         XCTAssertEqual(approvals.current.map(\.approvalId), ["ap-1"])
+        XCTAssertEqual(tasks.current.map(\.taskId), ["task-1"])
+        XCTAssertEqual(tasks.current.first?.currentStepLine, "step: Exposing task snapshot")
     }
 
     func testHydratorEmptyListFieldClearsAStore() {
@@ -169,7 +195,7 @@ final class LiveListStoresTests: XCTestCase {
 
     // MARK: - Shell integration
 
-    func testShellExposesTheThreeListStoresAndHydratesThem() throws {
+    func testShellExposesTheFourListStoresAndHydratesThem() throws {
         final class Harness {
             var peerFds: [Int32] = []
             func factory() throws -> BridgeClient {
@@ -211,6 +237,9 @@ final class LiveListStoresTests: XCTestCase {
                 "pending_approvals_detail": .array([.object([
                     "approval_id": .string("ap-42")
                 ])]),
+                "active_tasks": .array([.object([
+                    "task_id": .string("task-42")
+                ])]),
             ]
         )
         let data = try EnvelopeFraming.encode(snap)
@@ -218,8 +247,8 @@ final class LiveListStoresTests: XCTestCase {
             _ = Darwin.write(harness.peerFds[0], raw.baseAddress, raw.count)
         }
 
-        let allHydrated = expectation(description: "all three stores hydrated")
-        allHydrated.expectedFulfillmentCount = 3
+        let allHydrated = expectation(description: "all four stores hydrated")
+        allHydrated.expectedFulfillmentCount = 4
         let us1 = shell.sessionList.subscribe { rows in
             if rows.first?.sessionId == "s-42" { allHydrated.fulfill() }
         }
@@ -229,7 +258,10 @@ final class LiveListStoresTests: XCTestCase {
         let us3 = shell.pendingApprovals.subscribe { rows in
             if rows.first?.approvalId == "ap-42" { allHydrated.fulfill() }
         }
-        defer { us1(); us2(); us3() }
+        let us4 = shell.activeTasks.subscribe { rows in
+            if rows.first?.taskId == "task-42" { allHydrated.fulfill() }
+        }
+        defer { us1(); us2(); us3(); us4() }
         wait(for: [allHydrated], timeout: 2.0)
     }
 }

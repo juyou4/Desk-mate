@@ -104,6 +104,61 @@ def test_reducer_creates_pending_approval() -> None:
     assert pending[0].prompt == "Allow Bash?"
 
 
+def test_reducer_adds_approval_risk_and_preview_extras() -> None:
+    reducer, _sessions, approvals = _reducer()
+
+    reducer.apply(
+        PermissionRequested(
+            session_id="s1",
+            source="claude",
+            ts_ms=1_000,
+            title="Claude",
+            summary="needs permission",
+            approval_id="a1",
+            prompt="Allow Bash?",
+            tool_name="Bash",
+            command="sudo rm -rf build/cache",
+        )
+    )
+
+    pending = approvals.list_pending()
+    assert len(pending) == 1
+    extras = pending[0].extras
+    assert extras["tool_name"] == "Bash"
+    assert extras["command"] == "sudo rm -rf build/cache"
+    assert extras["risk_level"] == "high"
+    assert "Shell command" in extras["risk_summary"]
+    assert extras["approval_preview"] == "cmd: sudo rm -rf build/cache"
+
+
+def test_hook_permission_approval_gets_file_risk_context() -> None:
+    reducer, _sessions, approvals = _reducer()
+    event = event_from_hook(
+        normalize_hook_event(
+            {
+                "session_id": "s1",
+                "event": "PermissionRequest",
+                "approval_id": "a1",
+                "prompt": "Allow edit?",
+                "tool": "Edit",
+                "file_path": "/tmp/work/App.swift",
+            },
+            source="claude",
+        )
+    )
+
+    reducer.apply(event)
+
+    pending = approvals.list_pending()
+    assert len(pending) == 1
+    extras = pending[0].extras
+    assert extras["tool_name"] == "Edit"
+    assert extras["file_path"] == "/tmp/work/App.swift"
+    assert extras["risk_level"] == "medium"
+    assert extras["risk_summary"] == "Tool may modify a local file."
+    assert extras["approval_preview"] == "file: /tmp/work/App.swift"
+
+
 def test_reducer_preserves_actionable_state_until_resolved() -> None:
     reducer, sessions, _approvals = _reducer()
     reducer.apply(

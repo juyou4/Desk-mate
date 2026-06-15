@@ -37,7 +37,16 @@ from deskmate_agent.bridge import (
 )
 from deskmate_agent.codex_app_server import parse_codex_notification
 from deskmate_agent.hooks import normalize_hook_event, write_hook_event
-from deskmate_agent.memory import SessionMemory, SessionSummary
+from deskmate_agent.memory import (
+    MemorySuggestion,
+    SessionMemory,
+    SessionSummary,
+    TaskSuggestion,
+    ToolActionLog,
+    ToolTaskRecord,
+)
+from deskmate_agent.memory.suggestions import create_memory_suggestion_approval
+from deskmate_agent.memory.task_suggestions import create_task_suggestion_approval
 from deskmate_agent.module_registrations import write_module_registration
 from deskmate_agent.protocol.actions import (
     ActionSource,
@@ -137,10 +146,10 @@ async def test_agent_ready_and_snapshot_on_connect(
 
 
 @pytest.mark.asyncio
-async def test_setup_loads_bundled_pixel_default_pack(
+async def test_setup_loads_bundled_native_pack(
     short_socket_path: Path, tmp_path: Path
 ) -> None:
-    """V10 Phase 8: ``App.setup`` should pull in the bundled pixel
+    """V10 Phase 8: ``App.setup`` should pull in the bundled native
     pack via ``AppConfig.extra_pack_roots`` and surface it on the
     runtime so the UI + diagnostics know which pack is active."""
     # Point the primary packs root at an empty tmp dir so the only
@@ -161,8 +170,8 @@ async def test_setup_loads_bundled_pixel_default_pack(
         rt = await app.setup()
         try:
             reg = rt.character_pack_registry
-            assert "pixel_default" in reg.ids(), reg.ids()
-            pack = reg.get("pixel_default")
+            assert "deskmate_native" in reg.ids(), reg.ids()
+            pack = reg.get("deskmate_native")
             assert pack is not None
             assert pack.avatar.default_style == "pixel"
             # The bundled pack supports both styles — Phase 7's
@@ -494,6 +503,87 @@ async def test_snapshot_includes_recent_sessions(
 
 
 @pytest.mark.asyncio
+async def test_snapshot_includes_active_tasks_with_steps(
+    short_socket_path: Path, tmp_path: Path
+) -> None:
+    config = AppConfig(
+        socket_path=short_socket_path,
+        db_dir=tmp_path,
+        batch_window_s=0.01,
+        prewarm_enabled=False,
+        agent_runtime_scanner_enabled=False,
+    )
+    app = App(config)
+    rt = await app.setup()
+    try:
+        task = await rt.task_store.create(
+            title="Polish task lane",
+            notes="Keep island compact.",
+            status="in_progress",
+            created_at_ms=1_000,
+        )
+        await rt.task_store.replace_steps(
+            task.task_id,
+            [
+                {
+                    "step_id": "step-done",
+                    "content": "Read reference islands",
+                    "status": "completed",
+                    "created_at_ms": 1_000,
+                },
+                {
+                    "step_id": "step-done-2",
+                    "content": "Compare task lanes",
+                    "status": "completed",
+                    "created_at_ms": 1_050,
+                },
+                {
+                    "step_id": "step-current",
+                    "content": "Expose task snapshot",
+                    "status": "in_progress",
+                    "active_form": "Exposing task snapshot",
+                    "created_at_ms": 1_100,
+                },
+                {
+                    "step_id": "step-next",
+                    "content": "Wire Swift task lane",
+                    "status": "pending",
+                    "created_at_ms": 1_200,
+                },
+                {
+                    "step_id": "step-later",
+                    "content": "Verify compact island",
+                    "status": "pending",
+                    "created_at_ms": 1_300,
+                },
+            ],
+            updated_at_ms=2_000,
+        )
+
+        snapshot = await app._build_snapshot()  # noqa: SLF001
+        active_tasks = snapshot["active_tasks"]
+
+        assert len(active_tasks) == 1
+        row = active_tasks[0]
+        assert row["task_id"] == task.task_id
+        assert row["title"] == "Polish task lane"
+        assert row["status"] == "in_progress"
+        assert row["notes"] == "Keep island compact."
+        assert [step["step_id"] for step in row["steps"]] == [
+            "step-done",
+            "step-done-2",
+            "step-current",
+            "step-next",
+        ]
+        assert row["completed_step_count"] == 2
+        assert row["total_step_count"] == 5
+        assert row["current_step"]["step_id"] == "step-current"
+        assert row["current_step"]["active_form"] == "Exposing task snapshot"
+    finally:
+        await app.teardown()
+
+
+@pytest.mark.asyncio
 async def test_user_message_drives_reactive_intent(
     short_socket_path: Path, tmp_path: Path
 ) -> None:
@@ -529,6 +619,506 @@ async def test_user_message_drives_reactive_intent(
         serve.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await serve
+
+
+@pytest.mark.asyncio
+async def test_user_message_can_run_safe_computer_control(
+    short_socket_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    import deskmate_agent.skills.computer_control as control
+
+    monkeypatch.setattr(
+        control,
+        "_default_opener",
+        lambda args: calls.append(args) is None,
+    )
+    config = AppConfig(
+        socket_path=short_socket_path,
+        db_dir=tmp_path,
+        batch_window_s=0.01,
+        agent_runtime_scanner_enabled=False,
+    )
+    app = App(config)
+    await app.setup()
+    serve = asyncio.create_task(app.serve_forever())
+
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(short_socket_path))
+        await _collect(reader, 0.05)  # drain snapshot + ready
+
+        writer.write(
+            encode_envelope(
+                BridgeEnvelope.of(EnvelopeType.USER_MESSAGE, {"text": "open Terminal"})
+            )
+        )
+        await writer.drain()
+
+        envs = await _collect(reader, 0.3)
+        reply = next(
+            e.payload["payload"]["bubble"]
+            for e in envs
+            if e.type is EnvelopeType.INTENT
+            and e.payload.get("kind") == "show_pet_bubble"
+            and e.payload.get("payload", {}).get("bubble", {}).get("id")
+            == "user-msg-reply"
+        )
+        assert reply["text"] == "Opened Terminal."
+        assert calls == [["open", "-a", "Terminal"]]
+
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        serve.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await serve
+
+
+@pytest.mark.asyncio
+async def test_user_message_quit_app_waits_for_approval(
+    short_socket_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    import deskmate_agent.skills.computer_control as control
+
+    monkeypatch.setattr(
+        control,
+        "_default_opener",
+        lambda args: calls.append(args) is None,
+    )
+    config = AppConfig(
+        socket_path=short_socket_path,
+        db_dir=tmp_path,
+        batch_window_s=0.01,
+        agent_runtime_scanner_enabled=False,
+    )
+    app = App(config)
+    runtime = await app.setup()
+    serve = asyncio.create_task(app.serve_forever())
+    reader: asyncio.StreamReader | None = None
+    writer: asyncio.StreamWriter | None = None
+
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(short_socket_path))
+        await _collect(reader, 0.05)
+
+        writer.write(
+            encode_envelope(
+                BridgeEnvelope.of(
+                    EnvelopeType.USER_MESSAGE,
+                    {"text": "quit Terminal"},
+                )
+            )
+        )
+        await writer.drain()
+
+        envs = await _collect(reader, 0.3)
+        approval = runtime.approval_store.get("computer-control-1")
+        assert approval is not None
+        assert approval.prompt == "Allow Deskmate to quit Terminal?"
+        assert calls == []
+        assert any(
+            e.type is EnvelopeType.INTENT
+            and e.payload.get("kind") == "show_pet_bubble"
+            and e.payload.get("payload", {}).get("bubble", {}).get("id")
+            == "approval-computer-control-1"
+            for e in envs
+        )
+
+        action = InteractionAction(
+            source=ActionSource.PET,
+            target=ActionTarget.SYSTEM,
+            kind=InteractionKind.PERMISSION_RESOLVE,
+            payload={"approval_id": "computer-control-1", "allow": True},
+        )
+        writer.write(
+            encode_envelope(
+                BridgeEnvelope.of(
+                    EnvelopeType.INTERACTION,
+                    action.model_dump(mode="json"),
+                )
+            )
+        )
+        await writer.drain()
+
+        envs = await _collect(reader, 0.3)
+        assert calls == [
+            ["osascript", "-e", 'tell application "Terminal" to quit']
+        ]
+        assert any(
+            e.type is EnvelopeType.INTENT
+            and e.payload.get("kind") == "show_pet_bubble"
+            and e.payload.get("payload", {}).get("bubble", {}).get("text")
+            == "Quit Terminal."
+            for e in envs
+        )
+
+    finally:
+        if writer is not None:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+        serve.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await serve
+
+
+@pytest.mark.asyncio
+async def test_user_message_clipboard_waits_for_approval(
+    short_socket_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    import deskmate_agent.skills.computer_control as control
+
+    monkeypatch.setattr(
+        control,
+        "_default_opener",
+        lambda args: calls.append(args) is None,
+    )
+    config = AppConfig(
+        socket_path=short_socket_path,
+        db_dir=tmp_path,
+        batch_window_s=0.01,
+        agent_runtime_scanner_enabled=False,
+    )
+    app = App(config)
+    runtime = await app.setup()
+    serve = asyncio.create_task(app.serve_forever())
+    writer: asyncio.StreamWriter | None = None
+
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(short_socket_path))
+        await _collect(reader, 0.05)
+
+        writer.write(
+            encode_envelope(
+                BridgeEnvelope.of(
+                    EnvelopeType.USER_MESSAGE,
+                    {"text": 'copy hello "Deskmate"'},
+                )
+            )
+        )
+        await writer.drain()
+
+        envs = await _collect(reader, 0.3)
+        approval = runtime.approval_store.get("computer-control-1")
+        assert approval is not None
+        assert approval.prompt == "Allow Deskmate to set the clipboard?"
+        assert approval.extras["action_kind"] == "set_clipboard"
+        assert calls == []
+        assert any(
+            e.type is EnvelopeType.INTENT
+            and e.payload.get("kind") == "show_pet_bubble"
+            and e.payload.get("payload", {}).get("bubble", {}).get("id")
+            == "approval-computer-control-1"
+            for e in envs
+        )
+
+        action = InteractionAction(
+            source=ActionSource.PET,
+            target=ActionTarget.SYSTEM,
+            kind=InteractionKind.PERMISSION_RESOLVE,
+            payload={"approval_id": "computer-control-1", "allow": True},
+        )
+        writer.write(
+            encode_envelope(
+                BridgeEnvelope.of(
+                    EnvelopeType.INTERACTION,
+                    action.model_dump(mode="json"),
+                )
+            )
+        )
+        await writer.drain()
+
+        envs = await _collect(reader, 0.3)
+        assert calls == [
+            ["osascript", "-e", 'set the clipboard to "hello \\"Deskmate\\""']
+        ]
+        assert any(
+            e.type is EnvelopeType.INTENT
+            and e.payload.get("kind") == "show_pet_bubble"
+            and e.payload.get("payload", {}).get("bubble", {}).get("text")
+            == "Updated the clipboard."
+            for e in envs
+        )
+
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        serve.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await serve
+
+
+@pytest.mark.asyncio
+async def test_user_message_can_create_reminder(
+    short_socket_path: Path, tmp_path: Path
+) -> None:
+    config = AppConfig(
+        socket_path=short_socket_path,
+        db_dir=tmp_path,
+        batch_window_s=0.01,
+        agent_runtime_scanner_enabled=False,
+    )
+    app = App(config)
+    runtime = await app.setup()
+    serve = asyncio.create_task(app.serve_forever())
+
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(short_socket_path))
+        await _collect(reader, 0.05)
+
+        before_ms = int(asyncio.get_running_loop().time() * 1000)
+        writer.write(
+            encode_envelope(
+                BridgeEnvelope.of(
+                    EnvelopeType.USER_MESSAGE,
+                    {"text": "remind me to stretch in 10 minutes"},
+                )
+            )
+        )
+        await writer.drain()
+
+        envs = await _collect(reader, 0.3)
+        reminders = runtime.reminder_store.list(status=ReminderStatus.PENDING)
+        assert len(reminders) == 1
+        reminder = reminders[0]
+        assert reminder.text == "stretch"
+        assert reminder.extras["source"] == "reminder_control"
+        # App uses wall-clock time, so assert the relative offset instead of
+        # an exact timestamp.
+        assert 9 * 60 * 1000 <= reminder.due_at_ms - reminder.created_at_ms <= 10 * 60 * 1000
+        assert reminder.created_at_ms > 0
+        assert before_ms > 0
+        assert any(
+            e.type is EnvelopeType.INTENT
+            and e.payload.get("kind") == "show_pet_bubble"
+            and e.payload.get("payload", {}).get("bubble", {}).get("id")
+            == "user-msg-reply"
+            and e.payload["payload"]["bubble"]["text"]
+            == "Reminder set for 10 minutes: stretch."
+            for e in envs
+        )
+
+        writer.write(
+            encode_envelope(
+                BridgeEnvelope.of(
+                    EnvelopeType.STATE_SNAPSHOT_REQUEST,
+                    trace_id="trace-reminder",
+                )
+            )
+        )
+        await writer.drain()
+        snap_envs = await _collect(reader, 0.15)
+        snap = next(
+            e
+            for e in snap_envs
+            if e.type is EnvelopeType.STATE_SNAPSHOT
+            and e.trace_id == "trace-reminder"
+        )
+        assert snap.payload["pending_reminders"][0]["text"] == "stretch"
+
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        serve.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await serve
+
+
+@pytest.mark.asyncio
+async def test_user_message_task_command_pushes_active_task_snapshot(
+    short_socket_path: Path, tmp_path: Path
+) -> None:
+    config = AppConfig(
+        socket_path=short_socket_path,
+        db_dir=tmp_path,
+        batch_window_s=0.01,
+        agent_runtime_scanner_enabled=False,
+    )
+    app = App(config)
+    runtime = await app.setup()
+    serve = asyncio.create_task(app.serve_forever())
+
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(short_socket_path))
+        await _collect(reader, 0.05)
+
+        writer.write(
+            encode_envelope(
+                BridgeEnvelope.of(
+                    EnvelopeType.USER_MESSAGE,
+                    {
+                        "text": (
+                            "add task Polish active task snapshot -- notes: "
+                            "Menu should update"
+                        )
+                    },
+                )
+            )
+        )
+        await writer.drain()
+
+        envs = await _collect(reader, 0.4)
+        created_snapshot = next(
+            e
+            for e in envs
+            if e.type is EnvelopeType.STATE_SNAPSHOT
+            and e.payload.get("active_tasks")
+        )
+        active = created_snapshot.payload["active_tasks"]
+        assert active[0]["title"] == "Polish active task snapshot"
+        assert active[0]["notes"] == "Menu should update"
+        task_id = active[0]["task_id"]
+
+        tasks = await runtime.task_store.list(status="active", limit=10)
+        assert [task.task_id for task in tasks] == [task_id]
+
+        writer.write(
+            encode_envelope(
+                BridgeEnvelope.of(
+                    EnvelopeType.USER_MESSAGE,
+                    {
+                        "text": (
+                            "plan task active task snapshot: "
+                            "Expose checklist in menu; Write tests"
+                        )
+                    },
+                )
+            )
+        )
+        await writer.drain()
+        await _collect(reader, 0.4)
+
+        writer.write(
+            encode_envelope(
+                BridgeEnvelope.of(
+                    EnvelopeType.USER_MESSAGE,
+                    {"text": "start task active task snapshot"},
+                )
+            )
+        )
+        await writer.drain()
+
+        envs = await _collect(reader, 0.4)
+        def has_started_step(env: BridgeEnvelope) -> bool:
+            active = env.payload.get("active_tasks")
+            return (
+                env.type is EnvelopeType.STATE_SNAPSHOT
+                and isinstance(active, list)
+                and bool(active)
+                and active[0].get("current_step", {}).get("active_form")
+                == "Expose checklist in menu"
+            )
+
+        started_snapshot = next(e for e in envs if has_started_step(e))
+        started = started_snapshot.payload["active_tasks"][0]
+        assert started["status"] == "in_progress"
+        assert started["current_step"]["status"] == "in_progress"
+        assert [step["content"] for step in started["steps"]] == [
+            "Expose checklist in menu",
+            "Write tests",
+        ]
+
+        writer.write(
+            encode_envelope(
+                BridgeEnvelope.of(
+                    EnvelopeType.USER_MESSAGE,
+                    {"text": "pause task active task snapshot"},
+                )
+            )
+        )
+        await writer.drain()
+
+        envs = await _collect(reader, 0.4)
+        def has_paused_task(env: BridgeEnvelope) -> bool:
+            active = env.payload.get("active_tasks")
+            return (
+                env.type is EnvelopeType.STATE_SNAPSHOT
+                and isinstance(active, list)
+                and bool(active)
+                and active[0].get("status") == "open"
+            )
+
+        paused_snapshot = next(e for e in envs if has_paused_task(e))
+        paused = paused_snapshot.payload["active_tasks"][0]
+        assert paused["current_step"]["status"] == "pending"
+        assert paused["current_step"]["active_form"] == ""
+        assert [step["status"] for step in paused["steps"]] == [
+            "pending",
+            "pending",
+        ]
+
+        writer.write(
+            encode_envelope(
+                BridgeEnvelope.of(
+                    EnvelopeType.USER_MESSAGE,
+                    {"text": "resume task active task snapshot"},
+                )
+            )
+        )
+        await writer.drain()
+
+        await _collect(reader, 0.4)
+
+        writer.write(
+            encode_envelope(
+                BridgeEnvelope.of(
+                    EnvelopeType.USER_MESSAGE,
+                    {"text": "next step task active task snapshot"},
+                )
+            )
+        )
+        await writer.drain()
+
+        envs = await _collect(reader, 0.4)
+        def has_advanced_step(env: BridgeEnvelope) -> bool:
+            active = env.payload.get("active_tasks")
+            return (
+                env.type is EnvelopeType.STATE_SNAPSHOT
+                and isinstance(active, list)
+                and bool(active)
+                and active[0].get("current_step", {}).get("active_form")
+                == "Write tests"
+            )
+
+        advanced_snapshot = next(e for e in envs if has_advanced_step(e))
+        advanced = advanced_snapshot.payload["active_tasks"][0]
+        assert [step["status"] for step in advanced["steps"]] == [
+            "completed",
+            "in_progress",
+        ]
+
+        writer.write(
+            encode_envelope(
+                BridgeEnvelope.of(
+                    EnvelopeType.USER_MESSAGE,
+                    {"text": "complete task active task snapshot"},
+                )
+            )
+        )
+        await writer.drain()
+
+        envs = await _collect(reader, 0.4)
+        completed_snapshot = next(
+            e
+            for e in envs
+            if e.type is EnvelopeType.STATE_SNAPSHOT
+            and e.payload.get("active_tasks") == []
+        )
+        assert completed_snapshot.payload["active_tasks"] == []
+    finally:
+        if writer is not None:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+        serve.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await serve
+        await app.teardown()
 
 
 @pytest.mark.asyncio
@@ -637,6 +1227,8 @@ async def test_interaction_session_jump_updates_runtime_store(
         )
     )
     serve = asyncio.create_task(app.serve_forever())
+    reader: asyncio.StreamReader | None = None
+    writer: asyncio.StreamWriter | None = None
 
     try:
         reader, writer = await asyncio.open_unix_connection(str(short_socket_path))
@@ -822,6 +1414,7 @@ async def test_snapshot_includes_runtime_active_sessions(
             title="Deploy",
             summary="Waiting on CI",
             state=SessionState.ACTIVE,
+            phase=SessionPhase.THINKING,
             created_at_ms=_now_ms(),
             updated_at_ms=_now_ms(),
         )
@@ -837,6 +1430,7 @@ async def test_snapshot_includes_runtime_active_sessions(
             assert len(active) == 1
             assert active[0]["session_id"] == "live-1"
             assert active[0]["state"] == "active"
+            assert active[0]["phase"] == "thinking"
             assert active[0]["title"] == "Deploy"
         finally:
             writer.close()
@@ -1154,6 +1748,186 @@ async def test_hook_event_phase_presentation_reaches_island(
 
 
 @pytest.mark.asyncio
+async def test_stale_hook_reaper_closes_non_actionable_sessions(
+    short_socket_path: Path, tmp_path: Path
+) -> None:
+    from deskmate_agent.protocol.state import Priority
+
+    config = AppConfig(
+        socket_path=short_socket_path,
+        db_dir=tmp_path,
+        agent_runtime_scanner_enabled=False,
+        codex_app_server_enabled=False,
+        stale_hook_session_reaper_enabled=False,
+        stale_hook_session_ttl_s=0.1,
+    )
+    app = App(config)
+    runtime = await app.setup()
+    try:
+        runtime.session_store.upsert(
+            SessionInfo(
+                session_id="stale-tool",
+                title="Stale tool",
+                summary="searching",
+                state=SessionState.ACTIVE,
+                phase=SessionPhase.RUNNING_TOOL,
+                priority=Priority.P1,
+                created_at_ms=1,
+                updated_at_ms=1,
+                kind="hook_session",
+                source="codex",
+            )
+        )
+        runtime.session_store.upsert(
+            SessionInfo(
+                session_id="stale-approval",
+                title="Approval",
+                summary="allow command?",
+                state=SessionState.ACTIVE,
+                phase=SessionPhase.WAITING_FOR_APPROVAL,
+                priority=Priority.P0,
+                created_at_ms=1,
+                updated_at_ms=1,
+                kind="hook_session",
+                source="codex",
+            )
+        )
+
+        assert await app._reap_stale_hook_sessions() == 1
+
+        stale_tool = runtime.session_store.get("stale-tool")
+        stale_approval = runtime.session_store.get("stale-approval")
+        assert stale_tool is not None
+        assert stale_tool.state is SessionState.CLOSED
+        assert stale_tool.phase is SessionPhase.COMPLETED
+        assert stale_tool.closed_at_ms is not None
+        assert stale_approval is not None
+        assert stale_approval.state is SessionState.ACTIVE
+        assert stale_approval.phase is SessionPhase.WAITING_FOR_APPROVAL
+    finally:
+        await app.teardown()
+
+
+@pytest.mark.asyncio
+async def test_app_setup_finalizes_stale_running_tool_tasks(
+    short_socket_path: Path, tmp_path: Path
+) -> None:
+    async with ToolActionLog(tmp_path / "tool_actions.db") as log:
+        await log.upsert_task(
+            ToolTaskRecord(
+                task_id="stale-task",
+                conversation_id="default",
+                user_text="open terminal",
+                status="running",
+                summary="Opening Terminal",
+                action_count=1,
+                failed_count=0,
+                duplicate_count=0,
+                started_at_ms=1,
+                updated_at_ms=1,
+            )
+        )
+
+    config = AppConfig(
+        socket_path=short_socket_path,
+        db_dir=tmp_path,
+        agent_runtime_scanner_enabled=False,
+        codex_app_server_enabled=False,
+        stale_tool_task_ttl_s=0.1,
+    )
+    app = App(config)
+    runtime = await app.setup()
+    try:
+        task = await runtime.tool_action_log.get_task("stale-task")
+    finally:
+        await app.teardown()
+
+    assert task is not None
+    assert task.status == "failed"
+    assert task.completed_at_ms is not None
+    assert task.summary == "Interrupted before Deskmate could finish the tool task."
+
+
+@pytest.mark.asyncio
+async def test_task_nudge_watcher_emits_pet_and_island_intents(
+    short_socket_path: Path, tmp_path: Path
+) -> None:
+    config = AppConfig(
+        socket_path=short_socket_path,
+        db_dir=tmp_path,
+        batch_window_s=0.01,
+        agent_runtime_scanner_enabled=False,
+        codex_app_server_enabled=False,
+        task_nudge_enabled=False,
+        task_nudge_stale_after_s=1.0,
+        task_nudge_cooldown_s=60.0,
+    )
+    app = App(config)
+    runtime = await app.setup()
+    serve = asyncio.create_task(app.serve_forever())
+    reader: asyncio.StreamReader | None = None
+    writer: asyncio.StreamWriter | None = None
+
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(short_socket_path))
+        await _collect(reader, 0.2)
+        await runtime.task_store.create(
+            task_id="task-nudge-app",
+            title="Review persistent memory",
+            status="in_progress",
+            created_at_ms=1_000,
+        )
+        await runtime.task_store.replace_steps(
+            "task-nudge-app",
+            [
+                {
+                    "content": "Review task nudge surface",
+                    "status": "in_progress",
+                    "active_form": "Reviewing task nudge surface",
+                }
+            ],
+        )
+
+        nudged = await runtime.task_nudge_watcher.process_once(now_ms=3_000)
+        assert nudged is not None
+
+        envs = await _collect(reader, 0.3)
+        bubble_intents = [
+            e
+            for e in envs
+            if e.type is EnvelopeType.INTENT
+            and e.payload.get("kind") == "show_pet_bubble"
+            and e.payload.get("payload", {}).get("task_id") == "task-nudge-app"
+        ]
+        island_intents = [
+            e
+            for e in envs
+            if e.type is EnvelopeType.INTENT
+            and e.payload.get("kind") == "present_island"
+            and e.payload.get("payload", {}).get("activity_id")
+            == "task-nudge-task-nudge-app"
+        ]
+    finally:
+        if writer is not None:
+            writer.close()
+            await writer.wait_closed()
+        serve.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await serve
+        await app.teardown()
+
+    assert bubble_intents
+    assert (
+        bubble_intents[-1].payload["payload"]["bubble"]["text"]
+        == "Still working on: Review persistent memory - step: Reviewing task nudge surface"
+    )
+    assert island_intents
+    assert island_intents[-1].payload["payload"]["detail"] == (
+        "Still working on: Review persistent memory - step: Reviewing task nudge surface"
+    )
+
+
+@pytest.mark.asyncio
 async def test_module_registration_queue_reaches_bridge_and_replays(
     short_socket_path: Path, tmp_path: Path
 ) -> None:
@@ -1297,6 +2071,234 @@ async def test_permission_resolve_via_bridge_resolves_approval(
 
 
 @pytest.mark.asyncio
+async def test_permission_resolve_allows_memory_suggestion(
+    short_socket_path: Path, tmp_path: Path
+) -> None:
+    config = AppConfig(
+        socket_path=short_socket_path, db_dir=tmp_path, batch_window_s=0.01
+    )
+    app = App(config)
+    runtime = await app.setup()
+    create_memory_suggestion_approval(
+        MemorySuggestion(
+            key="preferred_ide",
+            value="Cursor",
+            reason="Useful for coding support.",
+        ),
+        approval_store=runtime.approval_store,
+        now_ms=_now_ms(),
+        approval_id="mem-suggestion",
+    )
+    serve = asyncio.create_task(app.serve_forever())
+
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(short_socket_path))
+        await _collect(reader, 0.05)
+
+        action = InteractionAction(
+            source=ActionSource.ISLAND,
+            target=ActionTarget.SYSTEM,
+            kind=InteractionKind.PERMISSION_RESOLVE,
+            payload={"approval_id": "mem-suggestion", "allow": True},
+        )
+        writer.write(
+            encode_envelope(
+                BridgeEnvelope.of(
+                    EnvelopeType.INTERACTION,
+                    action.model_dump(mode="json"),
+                )
+            )
+        )
+        await writer.drain()
+        await asyncio.sleep(0.05)
+
+        resolved = runtime.approval_store.get("mem-suggestion")
+        assert resolved is not None
+        assert resolved.status is ApprovalStatus.RESOLVED
+        assert resolved.decision is ApprovalDecision.ALLOW
+        facts = runtime.profile.get("memories.facts")
+        assert facts["preferred_ide"]["value"] == "Cursor"
+        assert facts["preferred_ide"]["approval_id"] == "mem-suggestion"
+        actions = await runtime.tool_action_log.recent(limit=10)
+        assert len(actions) == 1
+        assert actions[0].tool_call_id == "approval:mem-suggestion"
+        assert actions[0].tool_name == "deskmate_resolve_memory_suggestion"
+        assert actions[0].status == "completed"
+        assert actions[0].result == "Remembered preferred_ide: Cursor."
+        assert actions[0].arguments["memory_key"] == "preferred_ide"
+        assert actions[0].arguments["memory_value"] == "Cursor"
+        assert actions[0].arguments["memory_operation"] == "create"
+        assert actions[0].arguments["memory_old_value"] == ""
+
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+    finally:
+        serve.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await serve
+        await app.teardown()
+
+
+@pytest.mark.asyncio
+async def test_permission_resolve_audits_memory_update(
+    short_socket_path: Path, tmp_path: Path
+) -> None:
+    config = AppConfig(
+        socket_path=short_socket_path, db_dir=tmp_path, batch_window_s=0.01
+    )
+    app = App(config)
+    runtime = await app.setup()
+    runtime.profile.set(
+        "memories.facts",
+        {
+            "preferred_ide": {
+                "key": "preferred_ide",
+                "value": "VSCode",
+                "updated_at_ms": 1_000,
+            }
+        },
+    )
+    await runtime.profile.flush()
+    create_memory_suggestion_approval(
+        MemorySuggestion(
+            key="preferred_ide",
+            value="Cursor",
+            reason="User corrected the IDE preference.",
+        ),
+        approval_store=runtime.approval_store,
+        profile_store=runtime.profile,
+        now_ms=_now_ms(),
+        approval_id="mem-update",
+    )
+    serve = asyncio.create_task(app.serve_forever())
+
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(short_socket_path))
+        await _collect(reader, 0.05)
+
+        action = InteractionAction(
+            source=ActionSource.ISLAND,
+            target=ActionTarget.SYSTEM,
+            kind=InteractionKind.PERMISSION_RESOLVE,
+            payload={"approval_id": "mem-update", "allow": True},
+        )
+        writer.write(
+            encode_envelope(
+                BridgeEnvelope.of(
+                    EnvelopeType.INTERACTION,
+                    action.model_dump(mode="json"),
+                )
+            )
+        )
+        await writer.drain()
+        await asyncio.sleep(0.05)
+
+        facts = runtime.profile.get("memories.facts")
+        assert facts["preferred_ide"]["value"] == "Cursor"
+        assert facts["preferred_ide"]["previous_value"] == "VSCode"
+        actions = await runtime.tool_action_log.recent(limit=10)
+        assert len(actions) == 1
+        assert actions[0].tool_call_id == "approval:mem-update"
+        assert actions[0].result == "Updated preferred_ide: VSCode -> Cursor."
+        assert actions[0].arguments["memory_operation"] == "update"
+        assert actions[0].arguments["memory_old_value"] == "VSCode"
+        assert actions[0].arguments["memory_value"] == "Cursor"
+
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+    finally:
+        serve.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await serve
+        await app.teardown()
+
+
+@pytest.mark.asyncio
+async def test_permission_resolve_allows_task_suggestion(
+    short_socket_path: Path, tmp_path: Path
+) -> None:
+    config = AppConfig(
+        socket_path=short_socket_path, db_dir=tmp_path, batch_window_s=0.01
+    )
+    app = App(config)
+    runtime = await app.setup()
+    create_task_suggestion_approval(
+        TaskSuggestion(
+            title="Review agent memory tools",
+            notes="Use approval before durable writes.",
+            reason="Useful follow-up.",
+        ),
+        approval_store=runtime.approval_store,
+        now_ms=_now_ms(),
+        conversation_id="default",
+        approval_id="task-suggestion",
+    )
+    serve = asyncio.create_task(app.serve_forever())
+
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(short_socket_path))
+        await _collect(reader, 0.05)
+
+        action = InteractionAction(
+            source=ActionSource.ISLAND,
+            target=ActionTarget.SYSTEM,
+            kind=InteractionKind.PERMISSION_RESOLVE,
+            payload={"approval_id": "task-suggestion", "allow": True},
+        )
+        writer.write(
+            encode_envelope(
+                BridgeEnvelope.of(
+                    EnvelopeType.INTERACTION,
+                    action.model_dump(mode="json"),
+                )
+            )
+        )
+        await writer.drain()
+        envs = await _collect(reader, 0.3)
+
+        resolved = runtime.approval_store.get("task-suggestion")
+        assert resolved is not None
+        assert resolved.status is ApprovalStatus.RESOLVED
+        assert resolved.decision is ApprovalDecision.ALLOW
+        tasks = await runtime.task_store.list(status="all", limit=10)
+        assert len(tasks) == 1
+        assert tasks[0].title == "Review agent memory tools"
+        assert tasks[0].notes == "Use approval before durable writes."
+        actions = await runtime.tool_action_log.recent(limit=10)
+        assert len(actions) == 1
+        assert actions[0].tool_call_id == "approval:task-suggestion"
+        assert actions[0].tool_name == "deskmate_resolve_task_suggestion"
+        assert actions[0].status == "completed"
+        assert actions[0].result.startswith("Task created:\ntask-")
+        assert actions[0].arguments["task_title"] == "Review agent memory tools"
+        assert actions[0].arguments["task_notes"] == (
+            "Use approval before durable writes."
+        )
+        assert actions[0].arguments["task_status"] == "open"
+        snapshot = next(
+            e
+            for e in envs
+            if e.type is EnvelopeType.STATE_SNAPSHOT
+            and e.payload.get("active_tasks")
+        )
+        active = snapshot.payload["active_tasks"]
+        assert active[0]["title"] == "Review agent memory tools"
+        assert active[0]["notes"] == "Use approval before durable writes."
+
+    finally:
+        if writer is not None:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+        serve.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await serve
+        await app.teardown()
+
+
+@pytest.mark.asyncio
 async def test_approval_surface_publisher_pushes_show_and_dismiss_bubble(
     short_socket_path: Path, tmp_path: Path
 ) -> None:
@@ -1436,7 +2438,6 @@ async def test_permission_resolve_pushes_update_domain_state_intent(
 @pytest.mark.parametrize(
     "kind",
     [
-        InteractionKind.TASK_OPEN_DETAIL,
         InteractionKind.PET_INTERACT,
         InteractionKind.PET_DRAG,
         InteractionKind.PET_NEST,
@@ -1483,6 +2484,212 @@ async def test_handle_interaction_unhandled_kinds_are_no_ops(
         assert runtime.session_store.list() == []
         assert runtime.reminder_store.list() == []
     finally:
+        await app.teardown()
+
+
+@pytest.mark.asyncio
+async def test_task_open_detail_emits_task_detail_bubble_and_island(
+    short_socket_path: Path, tmp_path: Path
+) -> None:
+    config = AppConfig(
+        socket_path=short_socket_path,
+        db_dir=tmp_path,
+        batch_window_s=0.01,
+        agent_runtime_scanner_enabled=False,
+    )
+    app = App(config)
+    runtime = await app.setup()
+    serve = asyncio.create_task(app.serve_forever())
+    reader: asyncio.StreamReader | None = None
+    writer: asyncio.StreamWriter | None = None
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(short_socket_path))
+        await _collect(reader, 0.05)
+        task = await runtime.task_store.create(
+            task_id="task-detail-1",
+            title="Polish task detail",
+            notes="Show the current step.",
+            status="in_progress",
+            created_at_ms=1_000,
+        )
+        await runtime.task_store.replace_steps(
+            task.task_id,
+            [
+                {
+                    "content": "Read task row UI",
+                    "status": "completed",
+                },
+                {
+                    "content": "Expose detail action",
+                    "status": "in_progress",
+                    "active_form": "Exposing detail action",
+                },
+            ],
+            updated_at_ms=2_000,
+        )
+
+        action = InteractionAction(
+            source=ActionSource.MENU_BAR,
+            target=ActionTarget.SKILL,
+            kind=InteractionKind.TASK_OPEN_DETAIL,
+            payload={"task_id": "task-detail-1"},
+        )
+        writer.write(
+            encode_envelope(
+                BridgeEnvelope.of(
+                    EnvelopeType.INTERACTION,
+                    action.model_dump(mode="json"),
+                )
+            )
+        )
+        await writer.drain()
+        envs = await _collect(reader, 0.3)
+    finally:
+        if writer is not None:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+        serve.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await serve
+        await app.teardown()
+
+    bubble = next(
+        e.payload["payload"]["bubble"]
+        for e in envs
+        if e.type is EnvelopeType.INTENT
+        and e.payload.get("kind") == "show_pet_bubble"
+        and e.payload.get("payload", {}).get("task_id") == "task-detail-1"
+    )
+    assert bubble["id"] == "task-detail-task-detail-1"
+    assert "Task: Polish task detail" in bubble["text"]
+    assert "Current step: Exposing detail action" in bubble["text"]
+    assert "Notes: Show the current step." in bubble["text"]
+    assert "- 2. [in_progress] Exposing detail action" in bubble["text"]
+
+    island = next(
+        e.payload["payload"]
+        for e in envs
+        if e.type is EnvelopeType.INTENT
+        and e.payload.get("kind") == "present_island"
+        and e.payload.get("payload", {}).get("activity_id")
+        == "task-detail-task-detail-1"
+    )
+    assert island["detail"] == "Polish task detail · Exposing detail action"
+
+
+@pytest.mark.asyncio
+async def test_task_control_interactions_update_active_task_snapshot(
+    short_socket_path: Path, tmp_path: Path
+) -> None:
+    config = AppConfig(
+        socket_path=short_socket_path,
+        db_dir=tmp_path,
+        batch_window_s=0.01,
+        agent_runtime_scanner_enabled=False,
+    )
+    app = App(config)
+    runtime = await app.setup()
+    serve = asyncio.create_task(app.serve_forever())
+    reader: asyncio.StreamReader | None = None
+    writer: asyncio.StreamWriter | None = None
+
+    async def send_task_action(kind: InteractionKind) -> list[BridgeEnvelope]:
+        assert writer is not None
+        assert reader is not None
+        action = InteractionAction(
+            source=ActionSource.MENU_BAR,
+            target=ActionTarget.SKILL,
+            kind=kind,
+            payload={"task_id": "task-control-1"},
+        )
+        writer.write(
+            encode_envelope(
+                BridgeEnvelope.of(
+                    EnvelopeType.INTERACTION,
+                    action.model_dump(mode="json"),
+                )
+            )
+        )
+        await writer.drain()
+        return await _collect(reader, 0.4)
+
+    def first_active_snapshot(envs: list[BridgeEnvelope]) -> dict[str, object]:
+        env = next(
+            e
+            for e in envs
+            if e.type is EnvelopeType.STATE_SNAPSHOT
+            and e.payload.get("active_tasks")
+        )
+        return env.payload["active_tasks"][0]
+
+    try:
+        task = await runtime.task_store.create(
+            task_id="task-control-1",
+            title="Drive task from menu",
+            notes="Use typed actions.",
+            created_at_ms=1_000,
+        )
+        await runtime.task_store.replace_steps(
+            task.task_id,
+            [
+                {"content": "Expose controls", "status": "pending"},
+                {"content": "Verify snapshot", "status": "pending"},
+            ],
+            updated_at_ms=2_000,
+        )
+
+        reader, writer = await asyncio.open_unix_connection(str(short_socket_path))
+        await _collect(reader, 0.05)
+
+        envs = await send_task_action(InteractionKind.TASK_START)
+        started = first_active_snapshot(envs)
+        assert started["status"] == "in_progress"
+        assert started["current_step"]["status"] == "in_progress"  # type: ignore[index]
+        assert started["current_step"]["active_form"] == "Expose controls"  # type: ignore[index]
+
+        envs = await send_task_action(InteractionKind.TASK_PAUSE)
+        paused = first_active_snapshot(envs)
+        assert paused["status"] == "open"
+        assert paused["current_step"]["status"] == "pending"  # type: ignore[index]
+        assert paused["current_step"]["active_form"] == ""  # type: ignore[index]
+
+        await send_task_action(InteractionKind.TASK_START)
+        envs = await send_task_action(InteractionKind.TASK_ADVANCE)
+        advanced = first_active_snapshot(envs)
+        assert advanced["status"] == "in_progress"
+        assert advanced["current_step"]["active_form"] == "Verify snapshot"  # type: ignore[index]
+        assert [step["status"] for step in advanced["steps"]] == [  # type: ignore[index]
+            "completed",
+            "in_progress",
+        ]
+
+        envs = await send_task_action(InteractionKind.TASK_COMPLETE)
+        completed = next(
+            e
+            for e in envs
+            if e.type is EnvelopeType.STATE_SNAPSHOT
+            and e.payload.get("active_tasks") == []
+        )
+        assert completed.payload["active_tasks"] == []
+        actions = await runtime.tool_action_log.recent(limit=10)
+        assert [action.summary["action"] for action in actions] == [  # type: ignore[index]
+            "task.start",
+            "task.pause",
+            "task.start",
+            "task.advance",
+            "task.complete",
+        ]
+        assert all(action.tool_name == "deskmate_task_command" for action in actions)
+        assert all(action.status == "completed" for action in actions)
+    finally:
+        if writer is not None:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+        serve.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await serve
         await app.teardown()
 
 

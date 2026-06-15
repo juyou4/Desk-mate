@@ -11,6 +11,7 @@ from deskmate_agent.character_packs import (
     ACTIVE_PACK_ENV,
     BUILTIN_PACK_ID,
     DEFAULT_PACKS_DIR_ENV,
+    LEGACY_PIXEL_PACK_ID,
     CharacterPackError,
     CharacterPackRegistry,
     build_default_registry,
@@ -241,6 +242,15 @@ def test_select_active_pack_falls_back_to_builtin(tmp_path: Path) -> None:
     assert reg.select_active_pack("ghost").id == BUILTIN_PACK_ID
 
 
+def test_select_active_pack_falls_back_to_legacy_pixel_pack(
+    tmp_path: Path,
+) -> None:
+    reg = CharacterPackRegistry()
+    reg.register(load_manifest(_write_pack(tmp_path, "extra")))
+    reg.register(load_manifest(_write_pack(tmp_path, LEGACY_PIXEL_PACK_ID)))
+    assert reg.select_active_pack("ghost").id == LEGACY_PIXEL_PACK_ID
+
+
 def test_select_active_pack_falls_back_to_first_registered(
     tmp_path: Path,
 ) -> None:
@@ -346,7 +356,7 @@ def test_resolve_active_pack_argument_beats_env(
 # ---------------------------------------------------------------------------
 
 
-def test_bundled_pixel_default_pack_loads() -> None:
+def test_bundled_builtin_pack_loads() -> None:
     # Tests also serve as documentation: the shipped pack must stay
     # valid against the loader's rules at HEAD.
     bundled = (

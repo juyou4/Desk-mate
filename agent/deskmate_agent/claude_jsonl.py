@@ -149,8 +149,24 @@ def event_from_claude_jsonl_row(
 
     role = _optional_text(message, "role") or kind
     content = message.get("content")
-    texts, tool_uses = _extract_content(content)
+    texts, tool_uses, tool_results = _extract_content(content)
     text = _clip(" ".join(texts))
+    if tool_results:
+        result = tool_results[0]
+        result_text = _tool_result_text(result)
+        result_id = _optional_text(result, "tool_use_id", "toolUseID", "id") or ""
+        return SessionActivityUpdated(
+            session_id=row_session_id,
+            source="claude_code",
+            ts_ms=ts,
+            title=title,
+            summary=result_text or "Claude tool completed.",
+            cwd=row_cwd,
+            raw_event=raw_event,
+            phase=SessionPhase.RUNNING,
+            tool_result=result_text,
+            tool_result_id=result_id,
+        )
 
     if role == "user":
         if _looks_like_ask_user_question(text):
@@ -163,6 +179,7 @@ def event_from_claude_jsonl_row(
                 cwd=row_cwd,
                 raw_event=raw_event,
                 prompt=text,
+                last_user=text,
             )
         return SessionActivityUpdated(
             session_id=row_session_id,
@@ -173,12 +190,14 @@ def event_from_claude_jsonl_row(
             cwd=row_cwd,
             raw_event=raw_event,
             phase=SessionPhase.THINKING,
+            last_user=text,
         )
 
     if role == "assistant":
         if tool_uses:
             tool = tool_uses[0]
             tool_name = _optional_text(tool, "name") or "tool"
+            tool_id = _optional_text(tool, "id") or ""
             tool_input = tool.get("input")
             prompt = _tool_prompt(tool_name, tool_input)
             command = _tool_command(tool_input)
@@ -194,6 +213,7 @@ def event_from_claude_jsonl_row(
                     raw_event=raw_event,
                     prompt=prompt,
                     tool_name=tool_name,
+                    tool_id=tool_id,
                 )
             if _tool_needs_approval(tool_name, tool_input):
                 approval_id = _optional_text(tool, "id") or f"{row_session_id}-approval"
@@ -208,6 +228,7 @@ def event_from_claude_jsonl_row(
                     approval_id=approval_id,
                     prompt=prompt or f"Allow {tool_name}?",
                     tool_name=tool_name,
+                    tool_id=tool_id,
                     command=command,
                     file_path=file_path,
                 )
@@ -221,6 +242,7 @@ def event_from_claude_jsonl_row(
                 raw_event=raw_event,
                 phase=_phase_for_tool(tool_name, tool_input),
                 tool_name=tool_name,
+                tool_id=tool_id,
                 command=command,
                 file_path=file_path,
             )
@@ -234,6 +256,7 @@ def event_from_claude_jsonl_row(
                 cwd=row_cwd,
                 raw_event=raw_event,
                 failed=False,
+                last_assistant=text,
             )
         return SessionActivityUpdated(
             session_id=row_session_id,
@@ -244,14 +267,16 @@ def event_from_claude_jsonl_row(
             cwd=row_cwd,
             raw_event=raw_event,
             phase=SessionPhase.THINKING,
+            last_assistant=text,
         )
 
     return None
 
 
-def _extract_content(content: Any) -> tuple[list[str], list[dict[str, Any]]]:
+def _extract_content(content: Any) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]]]:
     texts: list[str] = []
     tool_uses: list[dict[str, Any]] = []
+    tool_results: list[dict[str, Any]] = []
     if isinstance(content, str):
         texts.append(content)
     elif isinstance(content, list):
@@ -264,9 +289,29 @@ def _extract_content(content: Any) -> tuple[list[str], list[dict[str, Any]]]:
                     text = _optional_text(item, "text")
                     if text:
                         texts.append(text)
+                elif item_type == "tool_result":
+                    tool_results.append(item)
                 elif item_type in {"tool_use", "server_tool_use"} or "name" in item:
                     tool_uses.append(item)
-    return texts, tool_uses
+    return texts, tool_uses, tool_results
+
+
+def _tool_result_text(result: dict[str, Any]) -> str:
+    content = result.get("content")
+    if isinstance(content, str):
+        return _clip(content)
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = _optional_text(item, "text", "content")
+                if text:
+                    parts.append(text)
+        return _clip(" ".join(parts))
+    text = _optional_text(result, "text", "result", "message")
+    return _clip(text) if text else ""
 
 
 def _tool_prompt(tool_name: str, tool_input: Any) -> str:

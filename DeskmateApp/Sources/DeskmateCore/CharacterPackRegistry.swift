@@ -30,8 +30,11 @@ public enum CharacterPackEnv {
     /// character pack resolves.
     public static let avatarStyleVar = "DESKMATE_AVATAR_STYLE"
 
-    /// Stable id of the built-in pixel pack shipped with the app.
-    public static let builtinPackId = "pixel_default"
+    /// Stable id of the primary built-in pack shipped with the app.
+    public static let builtinPackId = "deskmate_native"
+    /// Lightweight legacy fallback kept for older installs and low-resource
+    /// environments.
+    public static let legacyPixelPackId = "pixel_default"
 }
 
 
@@ -194,7 +197,10 @@ public final class CharacterPackRegistry: @unchecked Sendable {
     /// 4. ``nil`` if the registry is empty.
     public func selectActivePack(
         preferred: String? = nil,
-        fallbackOrder: [String] = [CharacterPackEnv.builtinPackId]
+        fallbackOrder: [String] = [
+            CharacterPackEnv.builtinPackId,
+            CharacterPackEnv.legacyPixelPackId,
+        ]
     ) -> CharacterPackLoader.LoadedPack? {
         if let preferred = preferred, let match = packs[preferred] {
             return match

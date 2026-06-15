@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One-shot frame generator for assets/packs/pixel_default.
 
-Produces six 8x8 RGBA PNGs that match the cat-face mask used by Swift's
+Produces lightweight 8x8 RGBA PNGs that match the cat-face mask used by Swift's
 ``AvatarRenderer.pixelMask()`` and the mood palette in
 ``AvatarRgbColor`` (see DeskmateApp/Sources/DeskmateCore/AvatarRenderer.swift).
 
@@ -43,8 +43,9 @@ _PALETTES: dict[str, tuple[tuple[int, int, int], tuple[int, int, int]]] = {
     "idle":     ((170, 172, 178), (120, 124, 132)),  # gray / gray
     "working":  ((66, 133, 244),  (14, 182, 210)),    # blue / cyan
     "thinking": ((138, 94, 228),  (84, 58, 186)),     # purple / indigo
-    "alert":    ((246, 156, 64),  (226, 74, 74)),     # orange / red
+    "waiting":  ((246, 156, 64),  (226, 74, 74)),     # orange / red
     "happy":    ((234, 120, 180), (246, 156, 64)),    # pink / orange
+    "failed":   ((226, 74, 74),   (255, 255, 255)),   # red / white
 }
 
 
@@ -58,6 +59,86 @@ def _idle_blink_mask() -> tuple[tuple[int, ...], ...]:
     for col in (1, 6):
         if eye_row[col] == 2:
             eye_row[col] = 1
+    return tuple(tuple(row) for row in rows)
+
+
+def _shift_mask(
+    mask: tuple[tuple[int, ...], ...],
+    *,
+    dx: int = 0,
+    dy: int = 0,
+) -> tuple[tuple[int, ...], ...]:
+    rows = len(mask)
+    cols = len(mask[0])
+    shifted = [[0 for _ in range(cols)] for _ in range(rows)]
+    for y, row in enumerate(mask):
+        for x, cell in enumerate(row):
+            nx = x + dx
+            ny = y + dy
+            if 0 <= nx < cols and 0 <= ny < rows:
+                shifted[ny][nx] = cell
+    return tuple(tuple(row) for row in shifted)
+
+
+def _wave_mask() -> tuple[tuple[int, ...], ...]:
+    rows = [list(row) for row in _BASE_MASK]
+    rows[1][7] = 2
+    rows[2][7] = 0
+    rows[3][7] = 0
+    return tuple(tuple(row) for row in rows)
+
+
+def _waiting_mask() -> tuple[tuple[int, ...], ...]:
+    rows = [list(row) for row in _BASE_MASK]
+    rows[3][1] = 1
+    rows[3][6] = 1
+    rows[5][3] = 0
+    rows[5][4] = 0
+    rows[6][3] = 2
+    rows[6][4] = 2
+    return tuple(tuple(row) for row in rows)
+
+
+def _dozing_mask() -> tuple[tuple[int, ...], ...]:
+    rows = [list(row) for row in _BASE_MASK]
+    rows[3][1] = 1
+    rows[3][6] = 1
+    rows[5][3] = 1
+    rows[5][4] = 1
+    rows[6][4] = 2
+    return tuple(tuple(row) for row in rows)
+
+
+def _sleeping_mask() -> tuple[tuple[int, ...], ...]:
+    rows = [list(row) for row in _BASE_MASK]
+    rows[3][1] = 1
+    rows[3][6] = 1
+    rows[5][3] = 1
+    rows[5][4] = 1
+    rows[6][2] = 0
+    rows[6][5] = 0
+    rows[7][2] = 0
+    rows[7][5] = 0
+    return tuple(tuple(row) for row in rows)
+
+
+def _react_click_mask() -> tuple[tuple[int, ...], ...]:
+    rows = [list(row) for row in _BASE_MASK]
+    rows[0][3] = 2
+    rows[0][4] = 2
+    rows[1][2] = 2
+    rows[1][5] = 2
+    return tuple(tuple(row) for row in rows)
+
+
+def _failed_mask() -> tuple[tuple[int, ...], ...]:
+    rows = [list(row) for row in _BASE_MASK]
+    for y, x in ((2, 0), (2, 2), (3, 1), (2, 5), (2, 7), (3, 6)):
+        rows[y][x] = 2
+    rows[5][3] = 0
+    rows[5][4] = 0
+    rows[6][3] = 2
+    rows[6][4] = 2
     return tuple(tuple(row) for row in rows)
 
 
@@ -128,12 +209,44 @@ def main() -> int:
         return 1
 
     targets = {
-        "idle/000.png":     _render(_BASE_MASK, _PALETTES["idle"]),
-        "idle/001.png":     _render(_idle_blink_mask(), _PALETTES["idle"]),
-        "working/000.png":  _render(_BASE_MASK, _PALETTES["working"]),
-        "thinking/000.png": _render(_BASE_MASK, _PALETTES["thinking"]),
-        "alert/000.png":    _render(_BASE_MASK, _PALETTES["alert"]),
-        "happy/000.png":    _render(_BASE_MASK, _PALETTES["happy"]),
+        "idle/000.png":          _render(_BASE_MASK, _PALETTES["idle"]),
+        "idle/001.png":          _render(_idle_blink_mask(), _PALETTES["idle"]),
+        "review/000.png":        _render(_BASE_MASK, _PALETTES["thinking"]),
+        "review/001.png":        _render(_idle_blink_mask(), _PALETTES["thinking"]),
+        "running/000.png":       _render(_shift_mask(_BASE_MASK, dy=0), _PALETTES["working"]),
+        "running/001.png":       _render(_shift_mask(_BASE_MASK, dx=1), _PALETTES["working"]),
+        "running/002.png":       _render(_shift_mask(_BASE_MASK, dy=-1), _PALETTES["working"]),
+        "running/003.png":       _render(_shift_mask(_BASE_MASK, dx=-1), _PALETTES["working"]),
+        "running-right/000.png": _render(_shift_mask(_BASE_MASK, dx=0), _PALETTES["working"]),
+        "running-right/001.png": _render(_shift_mask(_BASE_MASK, dx=1), _PALETTES["working"]),
+        "running-left/000.png":  _render(_shift_mask(_BASE_MASK, dx=0), _PALETTES["working"]),
+        "running-left/001.png":  _render(_shift_mask(_BASE_MASK, dx=-1), _PALETTES["working"]),
+        "waiting/000.png":       _render(_waiting_mask(), _PALETTES["waiting"]),
+        "waiting/001.png":       _render(_idle_blink_mask(), _PALETTES["waiting"]),
+        "waving/000.png":        _render(_BASE_MASK, _PALETTES["happy"]),
+        "waving/001.png":        _render(_wave_mask(), _PALETTES["happy"]),
+        "jumping/000.png":       _render(_BASE_MASK, _PALETTES["happy"]),
+        "jumping/001.png":       _render(_shift_mask(_BASE_MASK, dy=-1), _PALETTES["happy"]),
+        "jumping/002.png":       _render(_shift_mask(_BASE_MASK, dy=-2), _PALETTES["happy"]),
+        "jumping/003.png":       _render(_shift_mask(_BASE_MASK, dy=-1), _PALETTES["happy"]),
+        "failed/000.png":        _render(_failed_mask(), _PALETTES["failed"]),
+        "failed/001.png":        _render(_idle_blink_mask(), _PALETTES["failed"]),
+        "dozing/000.png":        _render(_dozing_mask(), _PALETTES["idle"]),
+        "dozing/001.png":        _render(_shift_mask(_dozing_mask(), dy=1), _PALETTES["idle"]),
+        "sleeping/000.png":      _render(_sleeping_mask(), _PALETTES["idle"]),
+        "sleeping/001.png":      _render(_shift_mask(_sleeping_mask(), dy=1), _PALETTES["idle"]),
+        "waking/000.png":        _render(_sleeping_mask(), _PALETTES["happy"]),
+        "waking/001.png":        _render(_dozing_mask(), _PALETTES["happy"]),
+        "waking/002.png":        _render(_shift_mask(_BASE_MASK, dy=-1), _PALETTES["happy"]),
+        "drag/000.png":          _render(_shift_mask(_BASE_MASK, dx=-1), _PALETTES["working"]),
+        "drag/001.png":          _render(_shift_mask(_BASE_MASK, dx=1), _PALETTES["working"]),
+        "react-click/000.png":   _render(_react_click_mask(), _PALETTES["happy"]),
+        "react-click/001.png":   _render(_wave_mask(), _PALETTES["happy"]),
+        # Legacy state names remain real files for older manifests/tests.
+        "working/000.png":       _render(_BASE_MASK, _PALETTES["working"]),
+        "thinking/000.png":      _render(_BASE_MASK, _PALETTES["thinking"]),
+        "alert/000.png":         _render(_waiting_mask(), _PALETTES["waiting"]),
+        "happy/000.png":         _render(_BASE_MASK, _PALETTES["happy"]),
     }
 
     for rel, data in targets.items():

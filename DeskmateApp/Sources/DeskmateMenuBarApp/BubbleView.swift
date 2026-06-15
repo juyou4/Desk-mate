@@ -9,6 +9,9 @@ import DeskmateCore
 struct BubbleView: View {
     let bubble: BubbleSpec
     let onAction: (BubbleAction) -> Void
+    let onMessage: (String) -> Void
+
+    @State private var draft = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -21,7 +24,7 @@ struct BubbleView: View {
                 }
                 Text(bubble.text)
                     .font(.system(size: 13))
-                    .lineLimit(5)
+                    .lineLimit(8)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if !bubble.actions.isEmpty {
@@ -36,10 +39,11 @@ struct BubbleView: View {
                     }
                 }
             }
+            messageInput
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .frame(maxWidth: 260, alignment: .leading)
+        .frame(width: bubbleWidth, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(Color(nsColor: .windowBackgroundColor).opacity(0.96))
@@ -49,6 +53,9 @@ struct BubbleView: View {
                 .stroke(Color.black.opacity(0.08), lineWidth: 0.5)
         )
         .shadow(color: .black.opacity(0.2), radius: 6, x: 0, y: 2)
+        .onChange(of: bubble.id) { _ in
+            draft = ""
+        }
     }
 
     private var tintForKind: Color {
@@ -60,5 +67,42 @@ struct BubbleView: View {
         case .randomReaction: return .pink
         case .system: return .gray
         }
+    }
+
+    private var bubbleWidth: CGFloat {
+        let text = bubble.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.count > 42 || !bubble.actions.isEmpty {
+            return 320
+        }
+        return 280
+    }
+
+    private var messageInput: some View {
+        HStack(spacing: 6) {
+            TextField("Ask Deskmate", text: $draft)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12))
+                .onSubmit(send)
+            Button(action: send) {
+                Image(systemName: "paperplane.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.mini)
+            .disabled(trimmedDraft.isEmpty)
+            .help("Send")
+        }
+    }
+
+    private var trimmedDraft: String {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func send() {
+        let message = trimmedDraft
+        guard !message.isEmpty else { return }
+        draft = ""
+        onMessage(message)
     }
 }

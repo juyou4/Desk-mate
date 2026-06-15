@@ -60,6 +60,44 @@ final class IslandContentProjectionTests: XCTestCase {
         XCTAssertEqual(focus?.sessionId, "answer")
     }
 
+    func testActiveTaskBeatsOrdinarySession() {
+        let task = TaskRow(
+            taskId: "task-1",
+            title: "Polish island task lane",
+            status: .inProgress
+        )
+        let content = IslandContentProjection.compute(
+            islandState: nil,
+            sessions: [SessionRow(sessionId: "s1", phase: .running)],
+            approvals: [],
+            tasks: [task]
+        )
+
+        guard case .task(let row) = content else {
+            return XCTFail("expected task, got \(content)")
+        }
+        XCTAssertEqual(row.taskId, "task-1")
+    }
+
+    func testNotificationBeatsActiveTask() {
+        let task = TaskRow(taskId: "task-1", status: .inProgress)
+        let content = IslandContentProjection.compute(
+            islandState: IslandSurfaceState(
+                kind: .notificationCard,
+                activityId: "reminder-1",
+                detail: "Stand up"
+            ),
+            sessions: [],
+            approvals: [],
+            tasks: [task]
+        )
+
+        guard case .notification(let state) = content else {
+            return XCTFail("expected notification, got \(content)")
+        }
+        XCTAssertEqual(state.activityId, "reminder-1")
+    }
+
     func testClosedSessionsDoNotCreateContent() {
         let content = IslandContentProjection.compute(
             islandState: nil,

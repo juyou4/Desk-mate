@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..context import ProactiveContext
-from ..protocol.state import UserFocus
+from ..protocol.state import Priority, UserFocus
 from .cooldown import CooldownTracker
 
 
@@ -34,6 +34,8 @@ class RuleFilter:
         # Cheapest checks first so we rarely reach the expensive ones.
         if ctx.perception.focus is UserFocus.FOCUSED:
             return RuleResult(False, "user_focused")
+        if ctx.current_priority in {Priority.P0, Priority.P1}:
+            return RuleResult(False, f"priority:{ctx.current_priority.value}")
         if ctx.idle_seconds < self.min_idle_seconds:
             return RuleResult(False, f"idle<{self.min_idle_seconds}s")
         if self.cooldown.within_cooldown():

@@ -163,7 +163,8 @@ policy before execution.
 ## Memory and LLM Tool Calls
 
 When `DESKMATE_LLM_API_KEY` is configured, Deskmate uses an OpenAI-compatible
-chat-completions endpoint:
+chat-completions endpoint. Keep real keys out of the repo; configure them in
+the shell or the user `launchctl` environment that starts the resident agent:
 
 ```bash
 DESKMATE_LLM_API_KEY=sk-...
@@ -175,13 +176,31 @@ DESKMATE_LLM_TOOL_ROUND_LIMIT=3  # optional: chained tool-call rounds; clamped t
 ```
 
 For DeepSeek-compatible local testing, point the same variables at the DeepSeek
-endpoint without committing the key:
+endpoint without committing the key. DeepSeek's OpenAI-compatible base URL is
+`https://api.deepseek.com`. The current model names are `deepseek-v4-flash` and
+`deepseek-v4-pro`; the older `deepseek-chat` / `deepseek-reasoner` names are
+scheduled to sunset on 2026-07-24 15:59 UTC.
 
 ```bash
+DESKMATE_LLM_API_KEY=...
 DESKMATE_LLM_BASE_URL=https://api.deepseek.com
 DESKMATE_LLM_MODEL=deepseek-v4-flash
 DESKMATE_LLM_STREAMING=1
 ```
+
+If the macOS app launches the agent outside your interactive shell, export the
+same variables to the launch session:
+
+```bash
+launchctl setenv DESKMATE_LLM_API_KEY '...'
+launchctl setenv DESKMATE_LLM_BASE_URL 'https://api.deepseek.com'
+launchctl setenv DESKMATE_LLM_MODEL 'deepseek-v4-flash'
+launchctl setenv DESKMATE_LLM_STREAMING '1'
+```
+
+Without an API key, deterministic local commands still work: reminders/timers,
+task management, runtime scans, hook ingest, build-status updates, and the
+allowlisted computer-control commands that do not require an LLM decision.
 
 The chat/tool path has persisted memory/context layers:
 

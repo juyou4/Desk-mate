@@ -1414,6 +1414,7 @@ async def test_snapshot_includes_runtime_active_sessions(
             title="Deploy",
             summary="Waiting on CI",
             state=SessionState.ACTIVE,
+            phase=SessionPhase.THINKING,
             created_at_ms=_now_ms(),
             updated_at_ms=_now_ms(),
         )
@@ -1429,6 +1430,7 @@ async def test_snapshot_includes_runtime_active_sessions(
             assert len(active) == 1
             assert active[0]["session_id"] == "live-1"
             assert active[0]["state"] == "active"
+            assert active[0]["phase"] == "thinking"
             assert active[0]["title"] == "Deploy"
         finally:
             writer.close()

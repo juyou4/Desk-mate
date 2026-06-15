@@ -24,6 +24,8 @@ struct IslandOverlay: View {
     /// disappear so we don't stick on a stale slide.
     @State private var carouselIndex: Int = 0
     @State private var pulsePhase: Bool = false
+    @State private var phasePeekUntil: Date = .distantPast
+    @State private var lastPhaseSignature: PhasePeekSignature?
     private let carouselTimer = Timer.publish(every: 3, on: .main, in: .common).autoconnect()
     private let pulseTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
@@ -43,6 +45,7 @@ struct IslandOverlay: View {
     /// dense; this gives full labels a short readable window without
     /// permanently occupying the menu bar.
     private static let sneakPeekExtraWidth: CGFloat = 160
+    private static let phasePeekDuration: TimeInterval = 2.2
 
     var body: some View {
         GeometryReader { geometry in
@@ -85,6 +88,12 @@ struct IslandOverlay: View {
             }
         }
         .onReceive(pulseTimer) { _ in
+            updatePhasePeek()
+            if phasePeekUntil <= Date(), phasePeekUntil != .distantPast {
+                withAnimation(Self.popSpring) {
+                    phasePeekUntil = .distantPast
+                }
+            }
             guard shouldPulseStatusDot else {
                 if pulsePhase { pulsePhase = false }
                 return
@@ -92,6 +101,9 @@ struct IslandOverlay: View {
             withAnimation(.easeInOut(duration: 0.9)) {
                 pulsePhase.toggle()
             }
+        }
+        .onAppear {
+            updatePhasePeek(allowPeek: false)
         }
     }
 
@@ -627,6 +639,9 @@ struct IslandOverlay: View {
                 .animation(.spring(duration: 0.3), value: isBuildDoneState)
             } else if shouldShowFullCompactLabels {
                 compactPeekTrailingModule
+            } else if let session = focusSession,
+                      shouldPrioritizePhaseInCompact(session) {
+                compactPhasePill(session)
             } else if shouldShowMultiSessionGlyphs {
                 multiSessionGlyphs
             } else if let notification = activeNotification {
@@ -1178,7 +1193,11 @@ struct IslandOverlay: View {
     }
 
     private var shouldShowFullCompactLabels: Bool {
-        !isExpanded && isSneakPeek
+        !isExpanded && (isSneakPeek || isPhasePeekActive)
+    }
+
+    private var isPhasePeekActive: Bool {
+        phasePeekUntil > Date()
     }
 
     private func compactPhaseLabel(for session: SessionRow) -> String {
@@ -1204,6 +1223,42 @@ struct IslandOverlay: View {
         case .unknown:
             return "IDE"
         }
+    }
+
+    private func shouldPrioritizePhaseInCompact(_ session: SessionRow) -> Bool {
+        switch session.phase {
+        case .thinking, .editing, .runningTool, .testing, .completed, .failed,
+             .waitingForApproval, .waitingForAnswer:
+            return true
+        case .running, .unknown:
+            return false
+        }
+    }
+
+    private func compactPhasePill(_ session: SessionRow) -> some View {
+        HStack(spacing: 4) {
+            phaseGlyph(for: session)
+                .frame(width: 12)
+            Text(compactPhaseLabel(for: session))
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.9))
+                .lineLimit(1)
+                .minimumScaleFactor(0.68)
+            if isWorkingPhase(session.phase) {
+                AnimatedEllipsis(color: phaseColor(for: session), size: 7)
+                    .frame(width: 12)
+            }
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(
+            Capsule(style: .continuous)
+                .fill(phaseColor(for: session).opacity(0.16))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(phaseColor(for: session).opacity(0.35), lineWidth: 0.5)
+        )
     }
 
     /// Extract the task name from the build-done detail string.
@@ -1688,6 +1743,35 @@ struct IslandOverlay: View {
             activeCount: max(visibleSessions.count, runtime.approvals.count)
         ))
     }
+
+    private func updatePhasePeek(allowPeek: Bool = true) {
+        guard let session = focusSession else {
+            lastPhaseSignature = nil
+            phasePeekUntil = .distantPast
+            return
+        }
+        let signature = PhasePeekSignature(session: session)
+        defer { lastPhaseSignature = signature }
+        guard allowPeek,
+              !isExpanded,
+              signature != lastPhaseSignature,
+              shouldPeekPhaseChange(signature)
+        else { return }
+        withAnimation(Self.popSpring) {
+            phasePeekUntil = Date().addingTimeInterval(Self.phasePeekDuration)
+        }
+    }
+
+    private func shouldPeekPhaseChange(_ signature: PhasePeekSignature) -> Bool {
+        guard runtime.degradationPolicy.level < 4 else { return false }
+        switch signature.phase {
+        case .thinking, .editing, .runningTool, .testing, .completed, .failed,
+             .waitingForApproval, .waitingForAnswer:
+            return true
+        case .running, .unknown:
+            return false
+        }
+    }
 }
 
 private struct QuestionInlineView: View {
@@ -1780,6 +1864,18 @@ private struct VibeIslandButtonStyle: ButtonStyle {
         case .secondary:
             return Color.white.opacity(pressed ? 0.12 : 0.16)
         }
+    }
+}
+
+private struct PhasePeekSignature: Equatable {
+    let sessionId: String
+    let phase: SessionRow.Phase
+    let updatedAtMs: Int
+
+    init(session: SessionRow) {
+        self.sessionId = session.sessionId
+        self.phase = session.phase
+        self.updatedAtMs = session.updatedAtMs
     }
 }
 

@@ -15,7 +15,8 @@ from deskmate_agent.agent_runtime import (
     scan_runtime_statuses,
 )
 from deskmate_agent.cli import main
-from deskmate_agent.sessions import SessionInfo, SessionStore
+from deskmate_agent.protocol.state import Priority
+from deskmate_agent.sessions import SessionInfo, SessionPhase, SessionStore
 
 
 def test_parse_ps_output_and_discover_known_processes() -> None:
@@ -403,3 +404,40 @@ async def test_codex_unobserved_after_30s():
     s = sessions.get("runtime-codex-12345")
     assert s is not None
     assert s.phase_source == "unobserved"
+
+
+@pytest.mark.asyncio
+async def test_passive_scan_preserves_observed_fine_grained_phase():
+    store = AgentRuntimeStore()
+    sessions = SessionStore()
+    ps_output = "12345 1 /opt/homebrew/bin/codex codex\n"
+    clock_ms = 1_000
+    scanner = AgentRuntimeScanner(
+        store,
+        sessions,
+        ps_provider=lambda: ps_output,
+        clock=lambda: clock_ms,
+    )
+
+    await scanner.scan_once()
+    existing = sessions.get("runtime-codex-12345")
+    assert existing is not None
+    sessions.upsert(
+        existing.model_copy(
+            update={
+                "phase": SessionPhase.THINKING,
+                "priority": Priority.P1,
+                "phase_source": "app_server",
+            }
+        )
+    )
+
+    clock_ms = 2_000
+    scanner._clock = lambda: clock_ms
+    await scanner.scan_once()
+
+    got = sessions.get("runtime-codex-12345")
+    assert got is not None
+    assert got.phase is SessionPhase.THINKING
+    assert got.priority is Priority.P1
+    assert got.phase_source == "app_server"

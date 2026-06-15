@@ -882,6 +882,12 @@ class AgentRuntimeScanner:
             if value is not None and str(value).strip():
                 extras[key] = str(value)
         phase_source: str | None = existing.phase_source if existing else None
+        phase = _scanner_phase(existing, status)
+        priority = (
+            existing.priority
+            if existing is not None and phase is existing.phase
+            else status.priority
+        )
 
         if status.source == AgentRuntimeSource.CODEX:
             if existing is None:
@@ -908,10 +914,10 @@ class AgentRuntimeScanner:
                 title=title,
                 summary=_summary_for(status),
                 state=SessionState.ACTIVE,
-                priority=status.priority,
+                priority=priority,
                 created_at_ms=existing.created_at_ms if existing else status.last_seen_ms,
                 updated_at_ms=status.last_seen_ms,
-                phase=status.phase,
+                phase=phase,
                 phase_source=phase_source,
                 cwd=status.cwd,
                 source=status.source.value,
@@ -1206,6 +1212,29 @@ def _is_hook_session(session: SessionInfo) -> bool:
         return True
     extras = session.extras or {}
     return "hook_source" in extras
+
+
+def _scanner_phase(
+    existing: SessionInfo | None,
+    status: AgentRuntimeStatus,
+) -> SessionPhase:
+    """Preserve observed fine-grained phases across passive scans."""
+    if existing is None:
+        return status.phase
+    if status.phase is not SessionPhase.RUNNING:
+        return status.phase
+    if existing.phase in {
+        SessionPhase.WAITING_FOR_APPROVAL,
+        SessionPhase.WAITING_FOR_ANSWER,
+        SessionPhase.THINKING,
+        SessionPhase.EDITING,
+        SessionPhase.RUNNING_TOOL,
+        SessionPhase.TESTING,
+        SessionPhase.COMPLETED,
+        SessionPhase.FAILED,
+    }:
+        return existing.phase
+    return status.phase
 
 
 # ---------------------------------------------------------------------------

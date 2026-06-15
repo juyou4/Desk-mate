@@ -36,6 +36,13 @@ from .reminder_control import (
     reminder_control_streaming_composer,
     schedule_reminder_request,
 )
+from .system_tools import (
+    CalendarEventRequest,
+    CalendarEventResult,
+    create_calendar_event,
+    get_weather,
+    list_system_tools,
+)
 from .task_control import (
     TaskCommand,
     parse_task_command,
@@ -49,7 +56,10 @@ __all__ = [
     "BuildStatusSkill",
     "BuildStatusWatcher",
     "canned_reply_composer",
+    "CalendarEventRequest",
+    "CalendarEventResult",
     "ComputerAction",
+    "create_calendar_event",
     "DESKMATE_TOOLS",
     "DeskmateToolExecutor",
     "PendingComputerActionStore",
@@ -58,6 +68,8 @@ __all__ = [
     "CodingSessionTracker",
     "default_llm_prewarm",
     "default_skill_metadata",
+    "get_weather",
+    "list_system_tools",
     "make_default_composer",
     "make_default_streaming_composer",
     "MemoryRequest",

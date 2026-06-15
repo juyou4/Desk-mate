@@ -32,6 +32,14 @@ from ..memory import (
 from ..reminders import Reminder, ReminderStatus, ReminderStore
 from .computer_control import PendingComputerActionStore, computer_control_composer
 from .reminder_control import ReminderRequest, schedule_reminder_request
+from .system_tools import (
+    CalendarEventRequest,
+    CommandRunner,
+    WeatherFetcher,
+    create_calendar_event,
+    get_weather,
+    list_system_tools,
+)
 
 Clock = Callable[[], int]
 IdFactory = Callable[[], str]
@@ -132,6 +140,89 @@ DESKMATE_TOOLS: list[dict[str, Any]] = [
                     }
                 },
                 "required": ["command"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "deskmate_create_calendar_event",
+            "description": (
+                "Create a macOS Calendar event. Use when the user explicitly "
+                "asks Deskmate to add, schedule, or put an event on the calendar."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Short event title.",
+                    },
+                    "start_at": {
+                        "type": "string",
+                        "description": "Event start datetime, ISO-like local time preferred.",
+                    },
+                    "end_at": {
+                        "type": "string",
+                        "description": "Optional event end datetime.",
+                    },
+                    "duration_minutes": {
+                        "type": "integer",
+                        "description": "Optional duration in minutes when end_at is absent.",
+                        "minimum": 1,
+                        "maximum": 1440,
+                    },
+                    "calendar": {
+                        "type": "string",
+                        "description": "Calendar name. Defaults to Calendar.",
+                    },
+                    "notes": {
+                        "type": "string",
+                        "description": "Optional event notes.",
+                    },
+                    "location": {
+                        "type": "string",
+                        "description": "Optional event location.",
+                    },
+                },
+                "required": ["title", "start_at"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "deskmate_get_weather",
+            "description": (
+                "Read a compact weather report for a location using a "
+                "CLI-friendly weather endpoint. Use this when the user asks "
+                "what the weather is, not when they only ask to open the app."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "City/location. Leave empty for the service default location.",
+                    }
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "deskmate_list_system_tools",
+            "description": (
+                "List Deskmate's high-level local system tools. This is a "
+                "read-only MCP-style discovery helper."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
                 "additionalProperties": False,
             },
         },
@@ -709,6 +800,8 @@ class DeskmateToolExecutor:
     chat_memory: ChatMemory | None = None
     task_store: DeskmateTaskStore | None = None
     tool_action_log: ToolActionLog | None = None
+    calendar_runner: CommandRunner | None = None
+    weather_fetcher: WeatherFetcher | None = None
     conversation_id: str = "default"
 
     async def execute(self, name: str, arguments: str | dict[str, Any] | None) -> str:
@@ -725,6 +818,12 @@ class DeskmateToolExecutor:
             return self._cancel_reminder(args)
         if name == "deskmate_computer_action":
             return await self._computer_action(args)
+        if name == "deskmate_create_calendar_event":
+            return self._create_calendar_event(args)
+        if name == "deskmate_get_weather":
+            return await self._get_weather(args)
+        if name == "deskmate_list_system_tools":
+            return list_system_tools()
         if name == "deskmate_remember_fact":
             return await self._remember_fact(args)
         if name == "deskmate_suggest_memory":
@@ -842,6 +941,31 @@ class DeskmateToolExecutor:
         if result is None:
             return "Tool error: command was not recognized or allowed."
         return result
+
+    def _create_calendar_event(self, args: dict[str, Any]) -> str:
+        title = str(args.get("title") or "").strip()
+        start_at = str(args.get("start_at") or "").strip()
+        end_at_raw = args.get("end_at")
+        end_at = str(end_at_raw).strip() if end_at_raw is not None else None
+        duration_raw = args.get("duration_minutes")
+        duration_minutes = duration_raw if isinstance(duration_raw, int) else None
+        if duration_minutes is not None:
+            duration_minutes = max(1, min(duration_minutes, 1440))
+        request = CalendarEventRequest(
+            title=title,
+            start_at=start_at,
+            end_at=end_at,
+            duration_minutes=duration_minutes,
+            calendar=str(args.get("calendar") or "Calendar").strip() or "Calendar",
+            notes=str(args.get("notes") or "").strip(),
+            location=str(args.get("location") or "").strip(),
+        )
+        result = create_calendar_event(request, runner=self.calendar_runner)
+        return result.message
+
+    async def _get_weather(self, args: dict[str, Any]) -> str:
+        location = str(args.get("location") or "").strip()
+        return await get_weather(location=location, fetcher=self.weather_fetcher)
 
     async def _remember_fact(self, args: dict[str, Any]) -> str:
         if self.profile_store is None:

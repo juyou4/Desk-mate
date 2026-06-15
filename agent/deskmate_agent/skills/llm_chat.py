@@ -1718,6 +1718,13 @@ def _tool_policy_error(
             f"Tool error: {name} requires an explicit user request "
             "to update, complete, cancel, or revise a tracked task."
         )
+    if name == "deskmate_create_calendar_event" and not _has_explicit_calendar_write_intent(
+        lowered
+    ):
+        return (
+            "Tool error: deskmate_create_calendar_event requires an explicit "
+            "user request to add or schedule a calendar event."
+        )
     return None
 
 
@@ -1827,6 +1834,33 @@ def _has_explicit_task_update_intent(lowered_user_text: str) -> bool:
             "取消任务",
             "标记任务",
             "任务完成",
+        )
+    )
+
+
+def _has_explicit_calendar_write_intent(lowered_user_text: str) -> bool:
+    return any(
+        marker in lowered_user_text
+        for marker in (
+            "add to calendar",
+            "add it to calendar",
+            "to calendar",
+            "put it on my calendar",
+            "put this on my calendar",
+            "on my calendar",
+            "create calendar event",
+            "create an event",
+            "schedule a meeting",
+            "schedule meeting",
+            "calendar event",
+            "加到日历",
+            "添加到日历",
+            "放到日历",
+            "创建日历",
+            "创建日程",
+            "添加日程",
+            "安排会议",
+            "约个会",
         )
     )
 

@@ -313,6 +313,13 @@ Available LLM tools:
 - `deskmate_computer_action`: routes a concise command through the same
   safety-first computer-control parser listed above. Sensitive actions still
   create approvals.
+- `deskmate_create_calendar_event`: creates a macOS Calendar event through a
+  fixed AppleScript command. The LLM path only allows it when the user
+  explicitly asks to add/schedule a calendar event.
+- `deskmate_get_weather`: reads a compact weather report from a CLI-friendly
+  HTTP endpoint (`wttr.in`) instead of only opening the Weather app.
+- `deskmate_list_system_tools`: read-only MCP-style discovery helper that lists
+  Deskmate's high-level local system tools.
 - `deskmate_remember_fact`: stores a durable fact/preference into
   `profile.db` after an explicit user request to remember it.
 - `deskmate_suggest_memory`: creates an approval-gated durable memory candidate
@@ -352,17 +359,21 @@ Available LLM tools:
   associated tool-call action summaries by `task_id`. This is read-only; it
   never executes a new action.
 
-The tool surface is deliberately high-level and allowlisted. There is no LLM
-tool for arbitrary shell commands, raw filesystem edits, unrestricted UI
-clicking, or free-form AppleScript. The execution layer also enforces local
-policy before running a tool: direct durable memory writes require explicit
-user wording such as `remember` / `记住`, and durable memory deletion requires
-explicit forget/remove wording. Ordinary preference-like conversation should
-use `deskmate_suggest_memory`, which creates an approval instead of writing
+The tool surface is deliberately high-level and allowlisted, following the same
+shape an MCP bridge would expose: named tools with JSON schemas and narrow
+handlers. There is no LLM tool for arbitrary shell commands, raw filesystem
+edits, unrestricted UI clicking, or free-form AppleScript. Calendar writes use
+a fixed `make new event` AppleScript template only; weather reads use a bounded
+HTTP fetch. The execution layer also enforces local policy before running a
+tool: direct durable memory writes require explicit user wording such as
+`remember` / `记住`, and durable memory deletion requires explicit forget/remove
+wording. Ordinary preference-like conversation should use
+`deskmate_suggest_memory`, which creates an approval instead of writing
 `profile.db` directly. Direct task creation/update similarly requires explicit
 task wording such as `add task`, `todo:`, or `complete task`; inferred todos
 should use `deskmate_suggest_task`, which creates an approval instead of
-writing `tasks.db` directly.
+writing `tasks.db` directly. Calendar creation also requires explicit
+calendar/schedule wording.
 
 LLM tool calls on both streaming and non-streaming paths are observable as
 Deskmate agent sessions. Each tool call emits `running_tool` then `completed`
